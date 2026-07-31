@@ -220,6 +220,7 @@ class TrackletBuilder:
                 persist=True,
                 verbose=False,
                 stream=True,
+                device=DEVICE,
             )
 
             shot_tracklets: dict[int, Tracklet] = {}
@@ -320,7 +321,7 @@ class SemanticExtractor:
     def _load_ocr(self) -> None:
         if self._ocr_engine is not None: return
         from paddleocr import PaddleOCR # type: ignore
-        self._ocr_engine = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+        self._ocr_engine = PaddleOCR(use_angle_cls=True, lang="en", show_log=False, use_gpu=(DEVICE == "cuda"))
 
     def _embed_images(self, images_bgr: list[np.ndarray]) -> np.ndarray:
         from PIL import Image

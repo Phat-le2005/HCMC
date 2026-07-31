@@ -206,26 +206,25 @@ class TrackletBuilder:
                 if not ret: break
                 shot_frames[fid] = frame
 
-            if not shot_frames:
-                continue
-
             frame_ids = sorted(shot_frames.keys())
             
-            # Dùng generator để Ultralytics không gom toàn bộ frame thành 1 batch khổng lồ (Gây tràn VRAM)
-            def frame_generator():
-                for fid in frame_ids:
-                    yield shot_frames[fid]
+            # Reset YOLO predictor để khởi tạo lại ByteTrack cho shot mới (Tránh track vắt chéo)
+            self.model.predictor = None 
 
-            results = self.model.track(
-                source=frame_generator(),
-                conf=self.conf_thresh,
-                iou=self.iou_thresh,
-                tracker="bytetrack.yaml",
-                persist=False,  # Track độc lập cho từng shot, không vắt chéo
-                verbose=False,
-                stream=True,
-                device=DEVICE,
-            )
+            results = []
+            for fid in frame_ids:
+                frame = shot_frames[fid]
+                # Track từng frame một để tránh OOM VRAM 100%
+                res = self.model.track(
+                    source=frame,
+                    conf=self.conf_thresh,
+                    iou=self.iou_thresh,
+                    tracker="bytetrack.yaml",
+                    persist=True,  # Giữ trạng thái track trong suốt shot hiện tại
+                    verbose=False,
+                    device=DEVICE,
+                )[0]
+                results.append(res)
 
             shot_tracklets: dict[int, Tracklet] = {}
             for local_i, result in enumerate(results):

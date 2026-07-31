@@ -1,0 +1,11 @@
+# ByteTrack Tracker Configuration
+# Place this file at the project root or pass its path via the YOLO tracker= argument.
+# ultralytics built-in: ultralytics/cfg/trackers/bytetrack.yaml
+
+tracker_type: bytetrack   # tracker type, ['bytetrack', 'botsort']
+track_high_thresh: 0.5    # threshold for the first association (high-score detections)
+track_low_thresh: 0.10    # threshold for the second association (low-score detections)
+new_track_thresh: 0.6     # threshold to init new track if no previous track matched
+track_buffer: 30          # buffer frames to keep lost tracks alive
+match_thresh: 0.8         # matching threshold for tracking (IOU-based)
+fuse_score: True          # fuse confidence score with IOU for matching

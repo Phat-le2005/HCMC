@@ -1,0 +1,35 @@
+# ╔══════════════════════════════════════════════════════════╗
+# ║   ATSME — Kaggle T4x2 / P100 Installation Script        ║
+# ║   Run this cell ONCE at the top of your notebook        ║
+# ╚══════════════════════════════════════════════════════════╝
+
+# ── Core numeric / data stack ─────────────────────────────────────────────────
+torch>=2.2.0
+torchvision>=0.17.0
+numpy>=1.26.0
+pandas>=2.2.0
+pyarrow>=15.0.0
+Pillow>=10.3.0
+
+# ── Computer Vision ───────────────────────────────────────────────────────────
+opencv-python-headless>=4.9.0.80
+scenedetect[opencv]>=0.6.4         # PySceneDetect
+ultralytics>=8.2.0                 # YOLOv9 + ByteTrack (built-in)
+
+# ── Vision-Language Models ────────────────────────────────────────────────────
+transformers>=4.45.0               # SigLIP-2, Qwen2.5-VL (HF path)
+accelerate>=0.30.0
+qwen-vl-utils>=0.0.8              # process_vision_info helper for Qwen-VL
+sentencepiece>=0.2.0
+einops>=0.8.0
+
+# ── vLLM (optional, for faster Qwen inference on A100/H100) ──────────────────
+# vllm>=0.4.3                      # uncomment if using --use-vllm flag
+
+# ── OCR ───────────────────────────────────────────────────────────────────────
+paddlepaddle-gpu>=2.6.1           # PaddlePaddle GPU
+paddleocr>=2.8.1
+
+# ── ASR ───────────────────────────────────────────────────────────────────────
+openai-whisper>=20231117
+ffmpeg-python>=0.2.0              # Python bindings (ffmpeg binary needed separately)

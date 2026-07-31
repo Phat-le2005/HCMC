@@ -209,15 +209,19 @@ class TrackletBuilder:
             if not shot_frames:
                 continue
 
-            frame_list = [shot_frames[f] for f in sorted(shot_frames.keys())]
             frame_ids = sorted(shot_frames.keys())
+            
+            # Dùng generator để Ultralytics không gom toàn bộ frame thành 1 batch khổng lồ (Gây tràn VRAM)
+            def frame_generator():
+                for fid in frame_ids:
+                    yield shot_frames[fid]
 
             results = self.model.track(
-                source=frame_list,
+                source=frame_generator(),
                 conf=self.conf_thresh,
                 iou=self.iou_thresh,
                 tracker="bytetrack.yaml",
-                persist=True,
+                persist=False,  # Track độc lập cho từng shot, không vắt chéo
                 verbose=False,
                 stream=True,
                 device=DEVICE,

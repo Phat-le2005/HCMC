@@ -39,11 +39,16 @@ def main():
 
     video_dir = Path(config.video_dir)
     if not video_dir.exists():
-        log.error(f"Video directory not found: {video_dir}")
+        log.error(f"Video directory or file not found: {video_dir}")
         return
 
-    video_paths = sorted(video_dir.glob("*.mp4"))
-    log.info(f"Found {len(video_paths)} videos in {video_dir}")
+    # Hỗ trợ cả 2 trường hợp: truyền vào thư mục hoặc truyền trực tiếp 1 file .mp4
+    if video_dir.is_file() and video_dir.suffix == '.mp4':
+        video_paths = [video_dir]
+    else:
+        video_paths = sorted(video_dir.glob("*.mp4"))
+        
+    log.info(f"Found {len(video_paths)} videos for {video_dir}")
 
     if not video_paths:
         return

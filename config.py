@@ -8,7 +8,7 @@ class ATSMEConfig:
     """
     
     # ── I/O Paths ─────────────────────────────────────────────────────────────
-    video_dir: str = "/kaggle/input/aic25-videos"
+    video_dir: str = "/kaggle/input/datasets/pha1t2/video1/video/L21_V001.mp4"
     mapping_csv: str = "/kaggle/input/aic25-mapping/map-keyframes-aic25-b1.csv"
     output_dir: str = "/kaggle/working/outputs"
     

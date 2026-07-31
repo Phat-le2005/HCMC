@@ -84,21 +84,36 @@ class ShotDetector:
         scene_list = scene_manager.get_scene_list()
 
         shots: list[Shot] = []
-        for idx, (start_tc, end_tc) in enumerate(scene_list):
-            shots.append(
-                Shot(
-                    shot_id=idx,
-                    start_frame=start_tc.get_frames(),
-                    end_frame=max(end_tc.get_frames() - 1, start_tc.get_frames()),
-                    video_id=video_id,
+        MAX_FRAMES_PER_SHOT = 300  # Chia nhỏ để tránh tràn RAM hệ thống
+        for start_tc, end_tc in scene_list:
+            start_f = start_tc.get_frames()
+            end_f = max(end_tc.get_frames() - 1, start_f)
+            
+            cur_start = start_f
+            while cur_start <= end_f:
+                cur_end = min(cur_start + MAX_FRAMES_PER_SHOT - 1, end_f)
+                shots.append(
+                    Shot(
+                        shot_id=len(shots),
+                        start_frame=cur_start,
+                        end_frame=cur_end,
+                        video_id=video_id,
+                    )
                 )
-            )
+                cur_start = cur_end + 1
 
         if not shots:
             cap = cv2.VideoCapture(str(video_path))
             total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             cap.release()
-            shots = [Shot(shot_id=0, start_frame=0, end_frame=max(total - 1, 0), video_id=video_id)]
+            start_f = 0
+            end_f = max(total - 1, 0)
+            
+            cur_start = start_f
+            while cur_start <= end_f:
+                cur_end = min(cur_start + MAX_FRAMES_PER_SHOT - 1, end_f)
+                shots.append(Shot(shot_id=len(shots), start_frame=cur_start, end_frame=cur_end, video_id=video_id))
+                cur_start = cur_end + 1
 
         log.info("Detected %d shot(s) in '%s'", len(shots), video_path.name)
         return shots
@@ -234,6 +249,12 @@ class TrackletBuilder:
                 t.keyframes = self._heuristic_keyframe_selector(t, shot_frames, frame_h, frame_w)
                 t.keyframe_images = [shot_frames[f] for f in t.keyframes if f in shot_frames]
                 all_tracklets.append(t)
+                
+            # Giải phóng RAM triệt để sau mỗi shot
+            shot_frames.clear()
+            if 'frame_list' in locals():
+                del frame_list
+            gc.collect()
 
         cap.release()
         free_vram("TrackletBuilder")

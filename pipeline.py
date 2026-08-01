@@ -332,13 +332,10 @@ class SemanticExtractor:
 
     def _load_ocr(self) -> None:
         if self._ocr_engine is not None: return
-        from paddleocr import PaddleOCR # type: ignore
-        try:
-            # PaddleOCR >= 3.x (API mới, không có show_log / use_gpu)
-            self._ocr_engine = PaddleOCR(use_angle_cls=True, lang="en")
-        except TypeError:
-            # PaddleOCR < 3.x (API cũ)
-            self._ocr_engine = PaddleOCR(use_angle_cls=True, lang="en", show_log=False, use_gpu=(DEVICE == "cuda"))
+        import easyocr  # type: ignore
+        log.info("Loading EasyOCR (en)...")
+        # gpu=True tự động dùng CUDA nếu có, fallback về CPU nếu không
+        self._ocr_engine = easyocr.Reader(["en"], gpu=(DEVICE == "cuda"), verbose=False)
 
     def _embed_images(self, images_bgr: list[np.ndarray]) -> np.ndarray:
         from PIL import Image
@@ -362,24 +359,12 @@ class SemanticExtractor:
     def _ocr_image(self, image_bgr: np.ndarray) -> str:
         self._load_ocr()
         try:
-            result = self._ocr_engine.ocr(image_bgr, cls=True)
+            # EasyOCR nhận ảnh BGR (numpy array) trực tiếp, trả về list[(bbox, text, confidence)]
+            results = self._ocr_engine.readtext(image_bgr, detail=1)
+            texts = [text for (_, text, conf) in results if conf > 0.3]
+            return " | ".join(texts)
         except Exception:
             return ""
-        if not result: return ""
-        # BUG FIX 3: PaddleOCR v3 trả về list[dict], v2 trả về list[list]
-        # Xử lý cả 2 định dạng
-        lines = result[0] if isinstance(result[0], list) else result
-        if lines is None: return ""
-        texts = []
-        for line in lines:
-            try:
-                if isinstance(line, dict):
-                    texts.append(line.get("text", ""))
-                elif line and len(line) > 1 and line[1]:
-                    texts.append(line[1][0])
-            except Exception:
-                continue
-        return " | ".join(t for t in texts if t)
 
     def _caption_image(self, image_bgr: np.ndarray) -> str:
         from PIL import Image

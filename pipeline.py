@@ -206,6 +206,10 @@ class TrackletBuilder:
                 if not ret: break
                 shot_frames[fid] = frame
 
+            # BUG FIX 1: Bỏ qua shot rỗng (không đọc được frame nào)
+            if not shot_frames:
+                continue
+
             frame_ids = sorted(shot_frames.keys())
             
             # Reset YOLO predictor để khởi tạo lại ByteTrack cho shot mới (Tránh track vắt chéo)
@@ -329,7 +333,12 @@ class SemanticExtractor:
     def _load_ocr(self) -> None:
         if self._ocr_engine is not None: return
         from paddleocr import PaddleOCR # type: ignore
-        self._ocr_engine = PaddleOCR(use_angle_cls=True, lang="en", show_log=False, use_gpu=(DEVICE == "cuda"))
+        try:
+            # PaddleOCR >= 3.x (API mới, không có show_log / use_gpu)
+            self._ocr_engine = PaddleOCR(use_angle_cls=True, lang="en")
+        except TypeError:
+            # PaddleOCR < 3.x (API cũ)
+            self._ocr_engine = PaddleOCR(use_angle_cls=True, lang="en", show_log=False, use_gpu=(DEVICE == "cuda"))
 
     def _embed_images(self, images_bgr: list[np.ndarray]) -> np.ndarray:
         from PIL import Image
@@ -339,17 +348,38 @@ class SemanticExtractor:
         for i in range(0, len(pil_images), self.config.semantic_batch_size):
             batch = pil_images[i : i + self.config.semantic_batch_size]
             inputs = self._siglip_processor(images=batch, return_tensors="pt", padding=True).to(DEVICE)
-            with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.float16):
-                outputs = self._siglip_model.get_image_features(**inputs)
+            # BUG FIX 2: autocast chỉ dùng được khi có CUDA, CPU sẽ crash nếu gọi cuda.amp
+            with torch.no_grad():
+                if DEVICE == "cuda":
+                    with torch.cuda.amp.autocast(dtype=torch.float16):
+                        outputs = self._siglip_model.get_image_features(**inputs)
+                else:
+                    outputs = self._siglip_model.get_image_features(**inputs)
             vectors.append(outputs.cpu().to(torch.float16).numpy())
             free_vram("SigLIP batch")
         return np.concatenate(vectors, axis=0)
 
     def _ocr_image(self, image_bgr: np.ndarray) -> str:
         self._load_ocr()
-        result = self._ocr_engine.ocr(image_bgr, cls=True)
-        if not result or result[0] is None: return ""
-        return " | ".join([line[1][0] for line in result[0] if line and line[1]])
+        try:
+            result = self._ocr_engine.ocr(image_bgr, cls=True)
+        except Exception:
+            return ""
+        if not result: return ""
+        # BUG FIX 3: PaddleOCR v3 trả về list[dict], v2 trả về list[list]
+        # Xử lý cả 2 định dạng
+        lines = result[0] if isinstance(result[0], list) else result
+        if lines is None: return ""
+        texts = []
+        for line in lines:
+            try:
+                if isinstance(line, dict):
+                    texts.append(line.get("text", ""))
+                elif line and len(line) > 1 and line[1]:
+                    texts.append(line[1][0])
+            except Exception:
+                continue
+        return " | ".join(t for t in texts if t)
 
     def _caption_image(self, image_bgr: np.ndarray) -> str:
         from PIL import Image

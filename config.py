@@ -15,7 +15,7 @@ class ATSMEConfig:
     # ── Models ────────────────────────────────────────────────────────────────
     yolo_model_path: str = "yolov9c.pt"
     siglip_model_id: str = "google/siglip-so400m-patch14-384"
-    qwen_model_id: str = "Qwen/Qwen2.5-VL-2B-Instruct"
+    qwen_model_id: str = "Qwen/Qwen2.5-VL-3B-Instruct"
     whisper_size: str = "base"
     use_vllm: bool = False
     

@@ -315,9 +315,14 @@ class SemanticExtractor:
             except Exception as e:
                 log.warning("vLLM load failed (%s). Falling back to HuggingFace.", e)
 
-        from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+        from transformers import AutoProcessor
+        try:
+            from transformers import Qwen2_5_VLForConditionalGeneration as QwenClass
+        except ImportError:
+            from transformers import Qwen2VLForConditionalGeneration as QwenClass
+
         self._qwen_processor = AutoProcessor.from_pretrained(self.config.qwen_model_id, trust_remote_code=True)
-        self._qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+        self._qwen_model = QwenClass.from_pretrained(
             self.config.qwen_model_id, torch_dtype=torch.float16, device_map=DEVICE, trust_remote_code=True
         ).eval()
 
@@ -349,7 +354,8 @@ class SemanticExtractor:
     def _caption_image(self, image_bgr: np.ndarray) -> str:
         from PIL import Image
         pil_img = Image.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
-        
+        pil_img.thumbnail((768, 768))  # Hạ độ phân giải xuống tối đa 768px để chống tràn VRAM khi chạy Qwen
+
         if self._vllm_engine is not None:
             from vllm import SamplingParams
             messages = [{"role": "user", "content": [{"type": "image", "image": pil_img}, {"type": "text", "text": self.QWEN_PROMPT}]}]

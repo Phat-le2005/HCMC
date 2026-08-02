@@ -368,14 +368,14 @@ Ví dụ sử dụng:
 
     for i, bi in enumerate(boundary_indices):
         # Frame thực trong video gốc
-        boundary_frame = (bi + 1) * sample_step
+        boundary_frame = int((bi + 1) * sample_step)
 
         shots.append({
-            "shot_id": i,
-            "start_frame": prev_frame,
-            "end_frame": boundary_frame - 1,
-            "start_timestamp": round(prev_frame / original_fps, 3),
-            "end_timestamp": round((boundary_frame - 1) / original_fps, 3),
+            "shot_id": int(i),
+            "start_frame": int(prev_frame),
+            "end_frame": int(boundary_frame - 1),
+            "start_timestamp": round(float(prev_frame) / original_fps, 3),
+            "end_timestamp": round(float(boundary_frame - 1) / original_fps, 3),
             "type": "semantic",
             "similarity_drop": round(float(1.0 - sim_curve[bi]), 4),
         })
@@ -383,11 +383,11 @@ Ví dụ sử dụng:
 
     # Shot cuối cùng
     shots.append({
-        "shot_id": len(shots),
-        "start_frame": prev_frame,
-        "end_frame": total_frames - 1,
-        "start_timestamp": round(prev_frame / original_fps, 3),
-        "end_timestamp": round((total_frames - 1) / original_fps, 3),
+        "shot_id": int(len(shots)),
+        "start_frame": int(prev_frame),
+        "end_frame": int(total_frames - 1),
+        "start_timestamp": round(float(prev_frame) / original_fps, 3),
+        "end_timestamp": round(float(total_frames - 1) / original_fps, 3),
         "type": "semantic",
         "similarity_drop": 0.0,
     })

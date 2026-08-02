@@ -37,8 +37,9 @@ class TransNetDataset(Dataset):
         self.video_path = video_path
         self.window_size = window_size
         
-        # Load decord với context CPU để tránh lỗi xung đột thread trong DataLoader
-        self.vr = VideoReader(video_path, ctx=cpu(0))
+        # Sử dụng tính năng native resize của decord (chạy bằng C++) cực kỳ nhanh!
+        # TransNetV2 yêu cầu width=48, height=27
+        self.vr = VideoReader(video_path, ctx=cpu(0), width=48, height=27)
         self.total_frames = len(self.vr)
         self.fps = self.vr.get_avg_fps()
         
@@ -62,13 +63,9 @@ class TransNetDataset(Dataset):
             pad_frames = np.repeat(last_frame, pad_len, axis=0)
             frames = np.concatenate([frames, pad_frames], axis=0)
             
-        import cv2
-        resized_frames = np.zeros((self.window_size, 27, 48, 3), dtype=np.uint8)
-        for i in range(self.window_size):
-            resized_frames[i] = cv2.resize(frames[i], (48, 27))
-            
+        # decord đã resize sẵn, ta chỉ việc chuyển sang tensor
         # TransNetV2 pytorch expects [B, T, 27, 48, 3] of type torch.uint8!
-        tensor_frames = torch.from_numpy(resized_frames)
+        tensor_frames = torch.from_numpy(frames)
         
         return tensor_frames, actual_len
 
@@ -103,7 +100,8 @@ def main():
     parser.add_argument("--output", type=str, default="transnet_shots.jsonl", help="File xuất kết quả")
     args = parser.parse_args()
     
-    num_workers = 4 if os.name != 'nt' else 0 
+    # TẮT num_workers (=0) để decord không bị kẹt luồng (deadlock) khi đọc file
+    num_workers = 0 
     video_path = args.video
     output_jsonl = args.output
     
@@ -111,9 +109,11 @@ def main():
         print(f"❌ Không tìm thấy video {video_path}")
         return
         
-    print(f"Khởi tạo DataLoader với num_workers={num_workers}...")
+    # Tăng batch_size lên 16 để tận dụng sức mạnh tính toán song song của GPU T4
+    batch_size = 16
+    print(f"Khởi tạo DataLoader với batch_size={batch_size}...")
     dataset = TransNetDataset(video_path, window_size=100)
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=num_workers)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Đang chạy Inference trên thiết bị: {device}")
@@ -135,13 +135,14 @@ def main():
                 
             probs = torch.sigmoid(logits).cpu().numpy()
             
-            actual_len = actual_lens[0].item()
-            valid_probs = probs[0, :actual_len, 0] 
+            # Xử lý theo từng batch
+            for b in range(probs.shape[0]):
+                actual_len = actual_lens[b].item()
+                valid_probs = probs[b, :actual_len, 0] 
+                all_preds.extend(valid_probs.tolist())
             
-            all_preds.extend(valid_probs.tolist())
-            
-            if (batch_idx + 1) % 10 == 0:
-                print(f"Đã xử lý {batch_idx + 1}/{len(dataloader)} windows...")
+            if (batch_idx + 1) % max(1, (10 // batch_size)) == 0:
+                print(f"Đã xử lý {min((batch_idx + 1) * batch_size, len(dataset))}/{len(dataset)} windows...")
                 
     print("Tiến hành phân tích kết quả dự đoán (Post-processing)...")
     all_preds_np = np.array(all_preds)

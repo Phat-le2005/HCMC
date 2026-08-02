@@ -134,7 +134,7 @@ class AudioBranch:
 
         self._pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            use_auth_token=self.hf_token,
+            token=self.hf_token,
         )
 
         # Đẩy lên GPU nếu có

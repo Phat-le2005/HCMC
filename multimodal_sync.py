@@ -173,55 +173,130 @@ class AudioBranch:
 
     def diarize(self, video_path: str) -> Tuple[List[SpeakerSegment], List[SpeakerTurn]]:
         """
-        Chạy Speaker Diarization trên toàn bộ audio.
-
-        Returns:
-            segments: Danh sách các đoạn phát biểu (timeline RTTM).
-            turns: Danh sách các điểm chuyển đổi người nói.
+        Chạy Speaker Diarization. Nếu gặp lỗi HuggingFace (403 GatedRepo),
+        sẽ tự động chuyển sang phương pháp dự phòng (Audio Energy Fallback).
         """
-        self._ensure_pipeline()
-
         # Trích xuất audio tạm
         tmp_dir = tempfile.mkdtemp()
         wav_path = os.path.join(tmp_dir, "audio.wav")
         self.extract_audio(video_path, wav_path)
 
-        # Chạy diarization
-        print("   🎙️ Đang chạy Speaker Diarization (có thể mất vài phút)...")
-        t0 = time.perf_counter()
+        segments = []
+        turns = []
 
-        diarization = self._pipeline(wav_path)
-
-        t1 = time.perf_counter()
-        print(f"   ✅ Diarization xong trong {t1 - t0:.1f}s")
-
-        # Parse kết quả thành SpeakerSegments
-        segments: List[SpeakerSegment] = []
-        for turn, _, speaker in diarization.itertracks(yield_label=True):
-            seg = SpeakerSegment(
-                speaker_id=str(speaker),
-                start_time=round(turn.start, 3),
-                end_time=round(turn.end, 3),
-                duration=round(turn.end - turn.start, 3),
-            )
-            segments.append(seg)
-
-        # Sắp xếp theo thời gian
-        segments.sort(key=lambda s: s.start_time)
-
-        # Trích xuất Speaker Turns (điểm chuyển đổi)
-        turns = self._extract_speaker_turns(segments)
-
-        print(f"   📊 {len(segments)} segments, {len(set(s.speaker_id for s in segments))} speakers, "
-              f"{len(turns)} turns")
-
-        # Cleanup
         try:
-            os.remove(wav_path)
-            os.rmdir(tmp_dir)
-        except OSError:
-            pass
+            self._ensure_pipeline()
+            print("   🎙️ Đang chạy Speaker Diarization (có thể mất vài phút)...")
+            t0 = time.perf_counter()
 
+            diarization = self._pipeline(wav_path)
+
+            t1 = time.perf_counter()
+            print(f"   ✅ Diarization xong trong {t1 - t0:.1f}s")
+
+            for turn, _, speaker in diarization.itertracks(yield_label=True):
+                segments.append(SpeakerSegment(
+                    speaker_id=str(speaker),
+                    start_time=round(turn.start, 3),
+                    end_time=round(turn.end, 3),
+                    duration=round(turn.end - turn.start, 3),
+                ))
+            segments.sort(key=lambda s: s.start_time)
+            turns = self._extract_speaker_turns(segments)
+
+        except Exception as e:
+            if "GatedRepo" in str(e) or "403" in str(e):
+                print(f"\n   ⚠️ CẢNH BÁO: Lỗi xác thực HuggingFace (Chưa Accept License).")
+                print(f"   🔄 TỰ ĐỘNG CHUYỂN SANG: Audio Energy Fallback (Không cần token).")
+                segments, turns = self._fallback_energy_detection(wav_path)
+            else:
+                raise e
+        finally:
+            # Cleanup
+            try:
+                os.remove(wav_path)
+                os.rmdir(tmp_dir)
+            except OSError:
+                pass
+
+        print(f"   📊 {len(segments)} segments, {len(turns)} turns")
+        return segments, turns
+
+    def _fallback_energy_detection(self, wav_path: str) -> Tuple[List[SpeakerSegment], List[SpeakerTurn]]:
+        """
+        Dự phòng: Phát hiện điểm thay đổi âm thanh dựa trên RMS Energy (tìm khoảng lặng).
+        Hoạt động hoàn toàn offline, không cần AI model hay HuggingFace token.
+        """
+        import wave
+        import struct
+
+        with wave.open(wav_path, 'rb') as wf:
+            n_channels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            framerate = wf.getframerate()
+            n_frames = wf.getnframes()
+            data = wf.readframes(n_frames)
+
+        # Chuyển đổi byte data sang numpy array
+        if sampwidth == 2:
+            fmt = f"<{n_frames * n_channels}h"
+        else:
+            raise ValueError("Chỉ hỗ trợ âm thanh 16-bit")
+        
+        samples = np.array(struct.unpack(fmt, data), dtype=np.float32)
+        
+        # Tính RMS Energy theo cửa sổ 100ms
+        window_size = int(framerate * 0.1)
+        # Reshape to calculate RMS per window
+        num_windows = len(samples) // window_size
+        samples = samples[:num_windows * window_size]
+        windows = samples.reshape(-1, window_size)
+        
+        # RMS = sqrt(mean(square))
+        rms = np.sqrt(np.mean(windows**2, axis=1))
+        
+        # Threshold: 10% của max RMS
+        threshold = np.max(rms) * 0.10
+        
+        is_speech = rms > threshold
+        
+        segments = []
+        turns = []
+        
+        # State machine để tìm các đoạn có tiếng
+        in_speech = False
+        start_time = 0.0
+        speaker_idx = 0
+        
+        for i, speech in enumerate(is_speech):
+            time_sec = i * 0.1
+            if speech and not in_speech:
+                in_speech = True
+                start_time = time_sec
+            elif not speech and in_speech:
+                in_speech = False
+                duration = time_sec - start_time
+                if duration >= 0.5: # Đoạn nói dài ít nhất 0.5s
+                    segments.append(SpeakerSegment(
+                        speaker_id=f"SPEAKER_{speaker_idx}",
+                        start_time=round(start_time, 3),
+                        end_time=round(time_sec, 3),
+                        duration=round(duration, 3)
+                    ))
+                    speaker_idx += 1
+                    
+                    # Nếu có đoạn trước đó, tạo 1 turn
+                    if len(segments) > 1:
+                        prev_seg = segments[-2]
+                        gap = start_time - prev_seg.end_time
+                        if 0.2 < gap < 5.0: # Khoảng lặng từ 0.2s đến 5s
+                            turns.append(SpeakerTurn(
+                                timestamp=round(start_time, 3),
+                                from_speaker=prev_seg.speaker_id,
+                                to_speaker=f"SPEAKER_{speaker_idx-1}",
+                                gap=round(gap, 3)
+                            ))
+                            
         return segments, turns
 
     @staticmethod

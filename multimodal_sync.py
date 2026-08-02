@@ -376,6 +376,16 @@ class VisualBranch:
             return
 
         from ultralytics import YOLO
+        import urllib.request
+
+        if not os.path.exists(self.model_path) and self.model_path == "yolov8n-face.pt":
+            print(f"   📥 Đang tự động tải model weights ({self.model_path}) từ GitHub...")
+            url = "https://github.com/akanametov/yolo-face/releases/download/v0.0.0/yolov8n-face.pt"
+            try:
+                urllib.request.urlretrieve(url, self.model_path)
+                print(f"   ✅ Đã tải xong {self.model_path}")
+            except Exception as e:
+                raise FileNotFoundError(f"Không thể tải weights tự động ({e}). Hãy tải thủ công từ: {url}")
 
         print(f"⏳ [Visual] Đang tải YOLOv8-face: {self.model_path}...")
         t0 = time.perf_counter()

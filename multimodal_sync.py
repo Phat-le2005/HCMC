@@ -380,14 +380,16 @@ class VisualBranch:
 
         if not os.path.exists(self.model_path) and self.model_path == "yolov8n-face.pt":
             print(f"   📥 Đang tự động tải model weights ({self.model_path}) từ GitHub...")
-            url = "https://github.com/akanametov/yolo-face/releases/download/v0.0.0/yolov8n-face.pt"
+            url = "https://github.com/lindevs/yolov8-face/releases/download/v0.0.1/yolov8n-face.pt"
             try:
                 urllib.request.urlretrieve(url, self.model_path)
                 print(f"   ✅ Đã tải xong {self.model_path}")
             except Exception as e:
-                raise FileNotFoundError(f"Không thể tải weights tự động ({e}). Hãy tải thủ công từ: {url}")
+                print(f"   ⚠️ Lỗi tải weights khuôn mặt (404/Network).")
+                print(f"   🔄 TỰ ĐỘNG CHUYỂN SANG: YOLOv8 gốc (yolov8n.pt) để nhận diện MC thay thế...")
+                self.model_path = "yolov8n.pt"
 
-        print(f"⏳ [Visual] Đang tải YOLOv8-face: {self.model_path}...")
+        print(f"⏳ [Visual] Đang tải YOLO model: {self.model_path}...")
         t0 = time.perf_counter()
 
         self._model = YOLO(self.model_path)
@@ -430,7 +432,7 @@ class VisualBranch:
             idx += 1
         cap.release()
 
-        print(f"   🔍 Đang phát hiện khuôn mặt trên {len(frames_batch)} frames...")
+        print(f"   🔍 Đang phát hiện Anchor/Người trên {len(frames_batch)} frames...")
         t0 = time.perf_counter()
 
         # ── YOLOv8 Batch Inference ───────────────────────────────────────
@@ -452,24 +454,29 @@ class VisualBranch:
             frame_area = h * w
 
             boxes = result.boxes
-            num_faces = len(boxes) if boxes is not None else 0
-
+            
+            num_valid_targets = 0
             max_face_area = 0.0
             face_center_x = 0.5
 
-            if num_faces > 0:
-                # Tính diện tích và vị trí cho mỗi khuôn mặt
-                for box in boxes.xyxy:
-                    x1, y1, x2, y2 = box[:4].cpu().numpy()
+            if boxes is not None and len(boxes) > 0:
+                for j in range(len(boxes)):
+                    # Nếu đang dùng YOLOv8 gốc (yolov8n.pt), chỉ lấy class 0 (person)
+                    if self.model_path == "yolov8n.pt" and int(boxes.cls[j].item()) != 0:
+                        continue
+                        
+                    x1, y1, x2, y2 = boxes.xyxy[j].cpu().numpy()
                     area = (x2 - x1) * (y2 - y1) / frame_area
                     cx = ((x1 + x2) / 2.0) / w
+                    
+                    num_valid_targets += 1
 
                     if area > max_face_area:
                         max_face_area = area
                         face_center_x = cx
 
             # Phân loại
-            state = self._classify_state(num_faces, max_face_area, face_center_x)
+            state = self._classify_state(num_valid_targets, max_face_area, face_center_x)
 
             states.append(VisualState(
                 timestamp=round(timestamps[i], 3),

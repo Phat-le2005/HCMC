@@ -125,10 +125,20 @@ class SigLIPExtractor:
             # Forward pass qua Vision Encoder (FP16 autocast)
             with torch.amp.autocast(device_type=self.device.type, enabled=(self.device.type == "cuda")):
                 outputs = self.model.get_image_features(**inputs)
+                
+            # Trích xuất tensor thực sự từ object trả về (Fix lỗi BaseModelOutputWithPooling)
+            if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+                embeds = outputs.pooler_output
+            elif hasattr(outputs, "image_embeds") and outputs.image_embeds is not None:
+                embeds = outputs.image_embeds
+            elif isinstance(outputs, torch.Tensor):
+                embeds = outputs
+            else:
+                embeds = outputs[0] # Fallback lấy item đầu tiên
 
             # L2 Normalization ngay trên GPU
             # ||v||₂ = 1 → cosine_sim(a, b) = a · b (dot product thuần túy)
-            normalized = F.normalize(outputs, p=2, dim=-1)
+            normalized = F.normalize(embeds, p=2, dim=-1)
             all_embeddings.append(normalized)
 
             if (i // self.batch_size + 1) % 5 == 0 or (i + self.batch_size) >= n:

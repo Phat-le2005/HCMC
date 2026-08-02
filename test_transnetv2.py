@@ -37,9 +37,8 @@ class TransNetDataset(Dataset):
         self.video_path = video_path
         self.window_size = window_size
         
-        # Sử dụng tính năng native resize của decord (chạy bằng C++) cực kỳ nhanh!
-        # TransNetV2 yêu cầu width=48, height=27
-        self.vr = VideoReader(video_path, ctx=cpu(0), width=48, height=27)
+        # Đọc video ở độ phân giải gốc (native resize của decord bị bug với get_batch)
+        self.vr = VideoReader(video_path, ctx=cpu(0))
         self.total_frames = len(self.vr)
         self.fps = self.vr.get_avg_fps()
         
@@ -63,9 +62,14 @@ class TransNetDataset(Dataset):
             pad_frames = np.repeat(last_frame, pad_len, axis=0)
             frames = np.concatenate([frames, pad_frames], axis=0)
             
-        # decord đã resize sẵn, ta chỉ việc chuyển sang tensor
+        # Resize về 27x48 bằng cv2 (nhanh và ổn định)
+        import cv2
+        resized = np.zeros((self.window_size, 27, 48, 3), dtype=np.uint8)
+        for i in range(self.window_size):
+            resized[i] = cv2.resize(frames[i], (48, 27))
+        
         # TransNetV2 pytorch expects [B, T, 27, 48, 3] of type torch.uint8!
-        tensor_frames = torch.from_numpy(frames)
+        tensor_frames = torch.from_numpy(resized)
         
         return tensor_frames, actual_len
 

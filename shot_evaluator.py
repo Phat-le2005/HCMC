@@ -640,14 +640,20 @@ class ShotQualityEvaluator:
             # ── ISS (cần shot tiếp theo) ─────────────────────────────────
             if i < len(shots) - 1:
                 next_indices = all_shot_indices[i + 1]
-                iss = self.compute_iss(embeddings, indices, next_indices)
+                if len(indices) == 0 or len(next_indices) == 0:
+                    iss = 0.5
+                else:
+                    iss = self.compute_iss(embeddings, indices, next_indices)
             else:
                 iss = 0.5  # Shot cuối cùng → giá trị trung tính
 
             # ── BSS (cần shot tiếp theo) ─────────────────────────────────
             if i < len(shots) - 1:
                 next_indices = all_shot_indices[i + 1]
-                bss = self.compute_bss(embeddings, indices, next_indices)
+                if len(indices) == 0 or len(next_indices) == 0:
+                    bss = 0.5
+                else:
+                    bss = self.compute_bss(embeddings, indices, next_indices)
             else:
                 bss = 0.5
 
@@ -655,8 +661,12 @@ class ShotQualityEvaluator:
             ids = self.compute_ids(embeddings, indices)
 
             # ── KRS ──────────────────────────────────────────────────────
-            krs, keyframe_emb_idx = self.compute_krs(embeddings, indices)
-            keyframe_real = frame_map[keyframe_emb_idx] if keyframe_emb_idx < len(frame_map) else 0
+            if len(indices) == 0:
+                krs = 1.0
+                keyframe_real = start_f
+            else:
+                krs, keyframe_emb_idx = self.compute_krs(embeddings, indices)
+                keyframe_real = frame_map[keyframe_emb_idx] if keyframe_emb_idx < len(frame_map) else 0
 
             # ── SQS ──────────────────────────────────────────────────────
             sqs = self.compute_sqs(scs, iss, bss, ids, krs)

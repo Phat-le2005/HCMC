@@ -789,23 +789,24 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ví dụ sử dụng:
-  # Đánh giá từ file JSONL (output của thuật toán SBD):
+  # Đánh giá từ 1 file JSONL cụ thể:
   python shot_evaluator.py --video "news.mp4" --shots-jsonl "shots.jsonl"
+
+  # TỰ ĐỘNG CHẤM ĐIỂM HÀNG LOẠT VÀ SO SÁNH (BENCHMARK):
+  python shot_evaluator.py --video "news.mp4" --compare-dir "./ket_qua_cac_thuat_toan"
 
   # Đánh giá với mock data (demo):
   python shot_evaluator.py --demo --video "news.mp4"
-
-  # Tùy chỉnh tham số:
-  python shot_evaluator.py --video "news.mp4" --shots-jsonl "shots.jsonl" \\
-      --sample-fps 5 --batch-size 64 --bss-window 8
         """,
     )
     parser.add_argument("--video", type=str, required=True,
                         help="Đường dẫn tới video cần đánh giá")
     parser.add_argument("--shots-jsonl", type=str, default=None,
                         help="File JSONL chứa danh sách shot (start_frame, end_frame)")
+    parser.add_argument("--compare-dir", type=str, default=None,
+                        help="Thư mục chứa các file JSONL. Tự động chấm điểm tất cả và lập bảng so sánh.")
     parser.add_argument("--output", type=str, default="evaluation_results.json",
-                        help="File JSON lưu kết quả đánh giá")
+                        help="File JSON lưu kết quả đánh giá (chỉ dùng khi test 1 file)")
     parser.add_argument("--demo", action="store_true",
                         help="Chạy với mock data (chia đều video thành 10 shots)")
 
@@ -822,7 +823,63 @@ Ví dụ sử dụng:
     if not os.path.exists(args.video):
         print(f"❌ Không tìm thấy video: {args.video}")
         return
+        
+    config = EvalConfig(
+        sample_fps=args.sample_fps,
+        batch_size=args.batch_size,
+        bss_window_k=args.bss_window,
+    )
+    evaluator = ShotQualityEvaluator(config)
 
+    # =========================================================================
+    # CHẾ ĐỘ SO SÁNH (BENCHMARK) NHIỀU THUẬT TOÁN
+    # =========================================================================
+    if args.compare_dir and os.path.exists(args.compare_dir):
+        jsonl_files = [os.path.join(args.compare_dir, f) for f in os.listdir(args.compare_dir) if f.endswith(".jsonl")]
+        if not jsonl_files:
+            print(f"❌ Không tìm thấy file .jsonl nào trong thư mục {args.compare_dir}")
+            return
+            
+        print(f"📁 TÌM THẤY {len(jsonl_files)} THUẬT TOÁN ĐỂ SO SÁNH.")
+        
+        comparison_results = []
+        for file in jsonl_files:
+            alg_name = os.path.basename(file).replace(".jsonl", "")
+            print(f"\n{'='*70}")
+            print(f"🚀 ĐÁNH GIÁ THUẬT TOÁN: {alg_name.upper()}")
+            shots = load_shots_from_jsonl(file)
+            
+            if len(shots) == 0:
+                print(f"⚠️ {alg_name} không tìm thấy shot nào!")
+                continue
+                
+            res = evaluator.evaluate(args.video, shots)
+            res["alg_name"] = alg_name
+            comparison_results.append(res)
+            
+        # In bảng so sánh Markdown
+        print("\n\n🏆 BẢNG XẾP HẠNG THUẬT TOÁN (BENCHMARK) 🏆")
+        print(f"{'Thuật toán':<25} | {'Shots':<6} | {'SCS':<6} | {'ISS':<6} | {'BSS':<6} | {'IDS':<6} | {'KRS':<6} | {'SQS (Tổng)':<10}")
+        print("-" * 90)
+        
+        # Sắp xếp theo điểm tổng hợp SQS giảm dần
+        comparison_results.sort(key=lambda x: x["video_sqs"], reverse=True)
+        
+        for i, r in enumerate(comparison_results):
+            medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else " "
+            print(f"{medal} {r['alg_name']:<22} | {r['total_shots']:<6} | {r['video_scs']:<6.3f} | {r['video_iss']:<6.3f} | {r['video_bss']:<6.3f} | {r['video_ids']:<6.3f} | {r['video_krs']:<6.3f} | {r['video_sqs']:<6.3f} 🌟")
+        
+        print("\n💡 Ghi chú:")
+        print(" - SCS: Độ đồng nhất bên trong shot (Càng cao càng tốt)")
+        print(" - ISS: Độ khác biệt giữa các shot (Càng cao càng tốt)")
+        print(" - BSS: Độ sắc nét của nhát cắt (Hard-cut)")
+        print(" - SQS: Điểm chất lượng tổng hợp (Quan trọng nhất quyết định xếp hạng)")
+        
+        return
+
+    # =========================================================================
+    # CHẾ ĐỘ CHẠY ĐƠN (1 FILE / DEMO)
+    # =========================================================================
     # ── Xác định danh sách shots ─────────────────────────────────────────
     if args.shots_jsonl and os.path.exists(args.shots_jsonl):
         print(f"📄 Đọc shots từ: {args.shots_jsonl}")
@@ -838,7 +895,7 @@ Ví dụ sử dụng:
         shots = [(i * chunk, (i + 1) * chunk - 1) for i in range(n_shots)]
         print(f"🎭 Demo mode: Chia đều {total_frames:,} frames thành {n_shots} shots")
     else:
-        print("❌ Cần cung cấp --shots-jsonl hoặc --demo")
+        print("❌ Cần cung cấp --shots-jsonl, --compare-dir hoặc --demo")
         return
 
     if len(shots) == 0:
@@ -846,13 +903,6 @@ Ví dụ sử dụng:
         return
 
     # ── Chạy đánh giá ────────────────────────────────────────────────────
-    config = EvalConfig(
-        sample_fps=args.sample_fps,
-        batch_size=args.batch_size,
-        bss_window_k=args.bss_window,
-    )
-
-    evaluator = ShotQualityEvaluator(config)
     results = evaluator.evaluate(args.video, shots)
 
     # ── Lưu kết quả ─────────────────────────────────────────────────────

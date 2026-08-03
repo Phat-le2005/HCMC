@@ -43,19 +43,15 @@ def test_shot_detection(video_path: str, method: str = "content", threshold: flo
         print(f"  ... (còn {len(scene_list) - 5} shots nữa)")
 
 if __name__ == "__main__":
-    # Thay đường dẫn tới video local của bạn ở đây
-    LOCAL_VIDEO_PATH = "sample.mp4" 
+    import argparse
+    parser = argparse.ArgumentParser(description="Baseline Shot Detection (PySceneDetect)")
+    parser.add_argument("--video", type=str, required=True, help="Đường dẫn tới video")
+    parser.add_argument("--method", type=str, default="content", choices=["content", "adaptive", "threshold"], help="Phương pháp tách shot")
+    parser.add_argument("--threshold", type=float, default=27.0, help="Ngưỡng nhạy của thuật toán")
     
-    if not os.path.exists(LOCAL_VIDEO_PATH):
-        print(f"❌ Không tìm thấy file {LOCAL_VIDEO_PATH}. Bạn nhớ đổi tên file video nhé!")
+    args = parser.parse_args()
+    
+    if not os.path.exists(args.video):
+        print(f"❌ Không tìm thấy file {args.video}.")
     else:
-        # Bạn có thể thử nghiệm nhiều thông số khác nhau cùng 1 lúc:
-        
-        # 1. Phương pháp mặc định (ContentDetector) - Threshold thấp = cắt nhiều, cao = cắt ít
-        test_shot_detection(LOCAL_VIDEO_PATH, method="content", threshold=27.0)
-        
-        # 2. Phương pháp ContentDetector với ngưỡng nhạy hơn
-        # test_shot_detection(LOCAL_VIDEO_PATH, method="content", threshold=20.0)
-        
-        # 3. Phương pháp Adaptive (thích ứng theo khung hình) - Tốt cho camera rung lắc
-        # test_shot_detection(LOCAL_VIDEO_PATH, method="adaptive", threshold=3.0)
+        test_shot_detection(args.video, method=args.method, threshold=args.threshold)

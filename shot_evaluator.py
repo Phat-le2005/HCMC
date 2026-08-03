@@ -735,7 +735,7 @@ class ShotQualityEvaluator:
         print(hdr)
         print(sep)
 
-        display_count = min(len(metrics), 20)
+        display_count = len(metrics)
         for m in metrics[:display_count]:
             print(
                 f"{m.shot_id:>5} │ "
@@ -745,8 +745,6 @@ class ShotQualityEvaluator:
                 f"{m.ids:>6.3f} │ {m.krs:>6.3f} │ {m.sqs:>6.3f} │ "
                 f"{m.keyframe_index:>9,}"
             )
-        if len(metrics) > display_count:
-            print(f"  ... (còn {len(metrics) - display_count} shots nữa)")
 
         print(sep)
         print(f"{'AVG':>5} │ {'':>12} │ {'':>5} │ "

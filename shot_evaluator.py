@@ -760,26 +760,43 @@ class ShotQualityEvaluator:
 
 # ─── CLI & Demo ──────────────────────────────────────────────────────────────
 
-def load_shots_from_jsonl(jsonl_path: str) -> List[Tuple[int, int]]:
+def load_shots_from_json(json_path: str) -> List[Tuple[int, int]]:
     """
-    Đọc danh sách shot từ file JSONL (output của các script SBD trước).
-
-    Mỗi dòng JSONL cần có trường "start_frame" và "end_frame".
-
-    Args:
-        jsonl_path: Đường dẫn tới file JSONL.
-
-    Returns:
-        List[(start_frame, end_frame)]
+    Đọc danh sách shot từ file JSON hoặc JSONL.
+    Hỗ trợ cả định dạng list chuẩn ([{...}, {...}]) và JSONL (mỗi dòng 1 object).
     """
     shots: List[Tuple[int, int]] = []
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
+    
+    if not os.path.exists(json_path):
+        return []
+        
+    with open(json_path, "r", encoding="utf-8") as f:
+        content = f.read().strip()
+        
+    if not content:
+        return []
+        
+    # Cố gắng parse như một mảng JSON chuẩn trước
+    if content.startswith("[") and content.endswith("]"):
+        try:
+            data = json.loads(content)
+            for record in data:
+                shots.append((int(record["start_frame"]), int(record["end_frame"])))
+            return shots
+        except json.JSONDecodeError:
+            pass # Chuyển sang thử JSONL
+            
+    # Nếu không phải mảng, thử parse từng dòng (JSONL)
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
             record = json.loads(line)
             shots.append((int(record["start_frame"]), int(record["end_frame"])))
+        except json.JSONDecodeError:
+            continue
+            
     return shots
 
 
@@ -789,8 +806,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ví dụ sử dụng:
-  # Đánh giá từ 1 file JSONL cụ thể:
-  python shot_evaluator.py --video "news.mp4" --shots-jsonl "shots.jsonl"
+  # Đánh giá từ 1 file JSON cụ thể:
+  python shot_evaluator.py --video "news.mp4" --shots-json "shots.json"
 
   # TỰ ĐỘNG CHẤM ĐIỂM HÀNG LOẠT VÀ SO SÁNH (BENCHMARK):
   python shot_evaluator.py --video "news.mp4" --compare-dir "./ket_qua_cac_thuat_toan"
@@ -801,10 +818,10 @@ Ví dụ sử dụng:
     )
     parser.add_argument("--video", type=str, required=True,
                         help="Đường dẫn tới video cần đánh giá")
-    parser.add_argument("--shots-jsonl", type=str, default=None,
-                        help="File JSONL chứa danh sách shot (start_frame, end_frame)")
+    parser.add_argument("--shots-json", type=str, default=None,
+                        help="File JSON/JSONL chứa danh sách shot (start_frame, end_frame)")
     parser.add_argument("--compare-dir", type=str, default=None,
-                        help="Thư mục chứa các file JSONL. Tự động chấm điểm tất cả và lập bảng so sánh.")
+                        help="Thư mục chứa các file JSON. Tự động chấm điểm tất cả và lập bảng so sánh.")
     parser.add_argument("--output", type=str, default="evaluation_results.json",
                         help="File JSON lưu kết quả đánh giá (chỉ dùng khi test 1 file)")
     parser.add_argument("--demo", action="store_true",
@@ -835,27 +852,35 @@ Ví dụ sử dụng:
     # CHẾ ĐỘ SO SÁNH (BENCHMARK) NHIỀU THUẬT TOÁN
     # =========================================================================
     if args.compare_dir and os.path.exists(args.compare_dir):
-        jsonl_files = [os.path.join(args.compare_dir, f) for f in os.listdir(args.compare_dir) if f.endswith(".jsonl")]
-        if not jsonl_files:
-            print(f"❌ Không tìm thấy file .jsonl nào trong thư mục {args.compare_dir}")
+        # Lấy tất cả file .json và .jsonl
+        json_files = [
+            os.path.join(args.compare_dir, f) 
+            for f in os.listdir(args.compare_dir) 
+            if f.endswith((".jsonl", ".json"))
+        ]
+        if not json_files:
+            print(f"❌ Không tìm thấy file .json hay .jsonl nào trong thư mục {args.compare_dir}")
             return
             
-        print(f"📁 TÌM THẤY {len(jsonl_files)} THUẬT TOÁN ĐỂ SO SÁNH.")
+        print(f"📁 TÌM THẤY {len(json_files)} THUẬT TOÁN ĐỂ SO SÁNH.")
         
         comparison_results = []
-        for file in jsonl_files:
-            alg_name = os.path.basename(file).replace(".jsonl", "")
+        for file in json_files:
+            alg_name = os.path.basename(file).split(".")[0]
             print(f"\n{'='*70}")
             print(f"🚀 ĐÁNH GIÁ THUẬT TOÁN: {alg_name.upper()}")
-            shots = load_shots_from_jsonl(file)
+            shots = load_shots_from_json(file)
             
             if len(shots) == 0:
-                print(f"⚠️ {alg_name} không tìm thấy shot nào!")
+                print(f"⚠️ {alg_name} không tìm thấy shot nào (hoặc sai định dạng JSON)!")
                 continue
                 
             res = evaluator.evaluate(args.video, shots)
             res["alg_name"] = alg_name
             comparison_results.append(res)
+            
+        if not comparison_results:
+            return
             
         # In bảng so sánh Markdown
         print("\n\n🏆 BẢNG XẾP HẠNG THUẬT TOÁN (BENCHMARK) 🏆")
@@ -881,9 +906,9 @@ Ví dụ sử dụng:
     # CHẾ ĐỘ CHẠY ĐƠN (1 FILE / DEMO)
     # =========================================================================
     # ── Xác định danh sách shots ─────────────────────────────────────────
-    if args.shots_jsonl and os.path.exists(args.shots_jsonl):
-        print(f"📄 Đọc shots từ: {args.shots_jsonl}")
-        shots = load_shots_from_jsonl(args.shots_jsonl)
+    if args.shots_json and os.path.exists(args.shots_json):
+        print(f"📄 Đọc shots từ: {args.shots_json}")
+        shots = load_shots_from_json(args.shots_json)
     elif args.demo:
         # Mock data: chia đều video thành 10 shots
         cap = cv2.VideoCapture(args.video)

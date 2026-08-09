@@ -3,67 +3,127 @@ import json
 import argparse
 from pathlib import Path
 from typing import List, Dict
+import subprocess
 
 import torch
 from torchvision import transforms
 from PIL import Image
 import soundfile as sf
+import numpy as np
+from sklearn.cluster import AgglomerativeClustering
 
 from scenedetect import VideoManager, SceneManager
 from scenedetect.detectors import ContentDetector
-import subprocess
+try:
+    from transnetv2 import TransNetV2
+except ImportError:
+    TransNetV2 = None
 
 from transformers import AutoModel, AutoImageProcessor
 from transformers import AutoModelForAudioClassification, AutoFeatureExtractor
 from paddleocr import PaddleOCR
 from whisper import load_model as load_whisper
 
-from sklearn.cluster import AgglomerativeClustering
-import numpy as np
-
 from config_v5 import config
+from news_classifier import NewsSceneClassifier
 
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
 
-def detect_shots(video_path: Path) -> List[Dict]:
+def detect_shots_pyscene(video_path: Path) -> List[tuple]:
     video_manager = VideoManager([str(video_path)])
     scene_manager = SceneManager()
     scene_manager.add_detector(ContentDetector(threshold=config.shot_detector_content_threshold))
     video_manager.start()
     scene_manager.detect_scenes(frame_source=video_manager)
     shot_list = []
-    for i, scene in enumerate(scene_manager.get_scene_list()):
-        start_frame, end_frame = scene
-        start_ms = video_manager.get_frame_timecode(start_frame).get_milliseconds()
-        end_ms = video_manager.get_frame_timecode(end_frame).get_milliseconds()
-        shot_list.append({
-            "shot_id": f"shot_{i}",
-            "start_ms": start_ms,
-            "end_ms": end_ms,
-            "start_frame": start_frame.get_frames(),
-            "end_frame": end_frame.get_frames(),
-        })
+    for scene in scene_manager.get_scene_list():
+        start_ms = video_manager.get_frame_timecode(scene[0]).get_milliseconds()
+        end_ms = video_manager.get_frame_timecode(scene[1]).get_milliseconds()
+        shot_list.append((start_ms, end_ms, scene[0].get_frames(), scene[1].get_frames()))
     video_manager.release()
     return shot_list
 
-def extract_keyframe(video_path: Path, start_frame: int, end_frame: int, shot_id: str, out_dir: Path) -> Path:
-    mid_frame = (start_frame + end_frame) // 2
-    out_path = out_dir / f"{shot_id}_keyframe.jpg"
-    if out_path.exists():
-        return out_path
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(video_path),
-        "-vf", f"select=eq(n\,{mid_frame})",
-        "-vframes", "1",
-        str(out_path)
-    ]
-    try:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"ffmpeg error extracting keyframe for {shot_id}: {e.stderr.decode()}")
-    return out_path
+def detect_shots_transnet(video_path: Path) -> List[tuple]:
+    if TransNetV2 is None:
+        print("Warning: TransNetV2 not installed. Skipping hybrid SBD.")
+        return []
+    
+    # TransNetV2 extracts fast cuts, dissolves
+    model = TransNetV2()
+    video_frames, single_frame_predictions, all_frame_predictions = model.predict_video(str(video_path))
+    scenes = model.predictions_to_scenes(single_frame_predictions)
+    
+    import cv2
+    cap = cv2.VideoCapture(str(video_path))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    
+    shot_list = []
+    for start_frame, end_frame in scenes:
+        start_ms = (start_frame / fps) * 1000
+        end_ms = (end_frame / fps) * 1000
+        shot_list.append((start_ms, end_ms, start_frame, end_frame))
+    return shot_list
+
+def merge_shot_boundaries(pyscene_shots, transnet_shots):
+    if not transnet_shots:
+        return pyscene_shots
+        
+    all_boundaries = set()
+    for s in pyscene_shots + transnet_shots:
+        all_boundaries.add(s[0])
+        all_boundaries.add(s[1])
+        
+    sorted_bounds = sorted(list(all_boundaries))
+    merged_bounds = []
+    
+    # Merge boundaries closer than threshold
+    for b in sorted_bounds:
+        if not merged_bounds:
+            merged_bounds.append(b)
+        else:
+            if b - merged_bounds[-1] > config.shot_merge_threshold_ms:
+                merged_bounds.append(b)
+                
+    final_shots = []
+    import cv2 # Approximation for frames
+    for i in range(len(merged_bounds) - 1):
+        start_ms = merged_bounds[i]
+        end_ms = merged_bounds[i+1]
+        final_shots.append({
+            "shot_id": f"shot_{i}",
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "start_frame": int(start_ms / (1000/25)), # approx 25fps for fallback
+            "end_frame": int(end_ms / (1000/25))
+        })
+    return final_shots
+
+def extract_multi_keyframes(video_path: Path, start_ms: int, end_ms: int, shot_id: str, out_dir: Path) -> List[Path]:
+    duration_ms = end_ms - start_ms
+    points = [0.25, 0.5, 0.75] if config.ocr_keyframes_per_shot == 3 else [0.5]
+    
+    paths = []
+    for i, p in enumerate(points):
+        target_ms = start_ms + (duration_ms * p)
+        out_path = out_dir / f"{shot_id}_k{i}.jpg"
+        if not out_path.exists():
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(target_ms / 1000.0),
+                "-i", str(video_path),
+                "-vframes", "1",
+                "-q:v", "2",
+                str(out_path)
+            ]
+            try:
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
+            except subprocess.CalledProcessError:
+                continue
+        if out_path.exists():
+            paths.append(out_path)
+    return paths
 
 def extract_audio_segment(video_path: Path, start_ms: int, end_ms: int, shot_id: str, out_dir: Path) -> Path:
     out_path = out_dir / f"{shot_id}.wav"
@@ -129,18 +189,26 @@ def compute_audio_vector(wav_path: Path, extractor, model) -> List[float]:
         outputs = model(**inputs).logits
     return outputs.squeeze().cpu().tolist()
 
-def run_ocr(image_path: Path, ocr: PaddleOCR) -> str:
-    result = ocr.ocr(str(image_path), cls=False)
-    if not result or not result[0]:
-        return ""
-    texts = [line[1][0] for line in result[0] if line and line[1]]
-    return " ".join(texts)
+def run_ocr_multi(image_paths: List[Path], ocr: PaddleOCR) -> str:
+    all_texts = set()
+    for img_path in image_paths:
+        result = ocr.ocr(str(img_path), cls=config.ocr_use_angle_cls)
+        if not result or not result[0]:
+            continue
+        texts = [line[1][0] for line in result[0] if line and line[1]]
+        all_texts.update(texts)
+    return " ".join(all_texts)
 
 def run_whisper(audio_path: Path, model):
     if not audio_path.exists():
         return ""
-    result = model.transcribe(str(audio_path))
-    return result.get('text', '')
+    # Add language parameter and post-processing
+    result = model.transcribe(str(audio_path), language=config.asr_language)
+    text = result.get('text', '').strip()
+    # Simple post-processing to remove extremely short hallucinations
+    if len(text) < 3 and not text.isalnum():
+        return ""
+    return text
 
 def main():
     parser = argparse.ArgumentParser(description="Module 1 – Static Pipeline")
@@ -160,19 +228,25 @@ def main():
 
     print("[1] Detecting shots...")
     if shots_file.exists():
-        print(f"Loading existing shots from {shots_file}")
         with open(shots_file, "r", encoding="utf-8") as f:
             shots = json.load(f)
     else:
-        shots = detect_shots(video_path)
+        pyscene_shots = detect_shots_pyscene(video_path)
+        if config.use_hybrid_sbd:
+            transnet_shots = detect_shots_transnet(video_path)
+            shots = merge_shot_boundaries(pyscene_shots, transnet_shots)
+        else:
+            shots = [{"shot_id": f"shot_{i}", "start_ms": s[0], "end_ms": s[1], "start_frame": s[2], "end_frame": s[3]} for i, s in enumerate(pyscene_shots)]
+            
         with open(shots_file, "w", encoding="utf-8") as f:
             json.dump(shots, f, ensure_ascii=False, indent=2)
 
     print(f"[2] Loading models on {config.device}...")
     img_processor, img_model = load_siglip()
     audio_extractor, audio_model = load_wavlm()
-    ocr = PaddleOCR(use_angle_cls=False, lang=config.ocr_lang)
+    ocr = PaddleOCR(use_angle_cls=config.ocr_use_angle_cls, lang=config.ocr_lang)
     whisper = load_whisper(config.whisper_model, device=config.device)
+    news_classifier = NewsSceneClassifier(config)
 
     fused_vectors = []
     
@@ -181,14 +255,18 @@ def main():
         shot_id = shot["shot_id"]
         
         # Check if already processed
-        if "global_ocr" in shot and "global_asr" in shot:
+        if "global_ocr" in shot and "global_asr" in shot and "news_type" in shot:
             fused = shot.get("image_vector", []) + shot.get("audio_vector", [])
             if fused:
                 fused_vectors.append(fused)
             continue
             
-        key_path = extract_keyframe(video_path, shot["start_frame"], shot["end_frame"], shot_id, keyframe_dir)
-        img_vec = compute_image_vector(key_path, img_processor, img_model)
+        key_paths = extract_multi_keyframes(video_path, shot["start_ms"], shot["end_ms"], shot_id, keyframe_dir)
+        
+        # Primary keyframe is the middle one or first one
+        primary_k_path = key_paths[len(key_paths)//2] if key_paths else extract_multi_keyframes(video_path, shot["start_ms"], shot["end_ms"], shot_id, keyframe_dir)[0]
+        
+        img_vec = compute_image_vector(primary_k_path, img_processor, img_model)
         
         audio_path = extract_audio_segment(video_path, shot["start_ms"], shot["end_ms"], shot_id, audio_dir)
         audio_vec = compute_audio_vector(audio_path, audio_extractor, audio_model)
@@ -196,12 +274,16 @@ def main():
         fused = img_vec + audio_vec
         fused_vectors.append(fused)
         
-        shot["image_vector_path"] = str(key_path)
+        shot["image_vector_path"] = str(primary_k_path)
         shot["audio_path"] = str(audio_path)
         shot["image_vector"] = img_vec
         shot["audio_vector"] = audio_vec
-        shot["global_ocr"] = run_ocr(key_path, ocr)
+        shot["global_ocr"] = run_ocr_multi(key_paths, ocr)
         shot["global_asr"] = run_whisper(audio_path, whisper)
+        
+        # News Classification (Zero-shot)
+        news_result = news_classifier.classify_image(str(primary_k_path))
+        shot["news_type"] = news_result["label"]
         
         # Incremental save
         with open(shots_file, "w", encoding="utf-8") as f:
@@ -213,7 +295,6 @@ def main():
         times = np.array([s["start_ms"] for s in shots])
         time_penalty = config.scene_cluster_alpha * np.abs(times[:, None] - times[None, :]) / 1000.0
         
-        # Prevent division by zero
         norms = np.linalg.norm(X, axis=1, keepdims=True)
         norms = np.clip(norms, 1e-8, None)
         norm_X = X / norms
@@ -232,11 +313,18 @@ def main():
         for scene_id, shot_group in scenes.items():
             if len(shot_group) < config.scene_min_shots:
                 continue
+            
+            # Majority vote for scene news type
+            news_types = [s.get("news_type", "unknown") for s in shot_group]
+            from collections import Counter
+            majority_news = Counter(news_types).most_common(1)[0][0]
+            
             scene_list.append({
                 "scene_id": f"scene_{scene_id}",
                 "shot_ids": [s["shot_id"] for s in shot_group],
                 "start_ms": min(s["start_ms"] for s in shot_group),
                 "end_ms": max(s["end_ms"] for s in shot_group),
+                "news_type": majority_news
             })
         with open(out_dir / "scenes.json", "w", encoding="utf-8") as f:
             json.dump(scene_list, f, ensure_ascii=False, indent=2)

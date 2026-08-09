@@ -9,8 +9,11 @@ import gc
 
 from decord import VideoReader, cpu
 import torch
+from torchvision import transforms
+from PIL import Image
 from ultralytics import YOLO
 from paddleocr import PaddleOCR
+from transformers import AutoModel, AutoImageProcessor
 
 from config_v5 import config
 
@@ -57,6 +60,46 @@ class ReIDMemoryPool:
             return best_tid, best_sim
         return None, 0.0
 
+def crop_and_embed(frame_np, bbox, processor, model):
+    # bbox is [x1, y1, x2, y2] normalized
+    h, w, _ = frame_np.shape
+    x1, y1, x2, y2 = bbox
+    x1, y1, x2, y2 = int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)
+    
+    # Pad a little bit to avoid edge issues
+    x1, y1 = max(0, x1 - 5), max(0, y1 - 5)
+    x2, y2 = min(w, x2 + 5), min(h, y2 + 5)
+    
+    if x2 <= x1 or y2 <= y1:
+        return [0.0] * 768
+        
+    crop = frame_np[y1:y2, x1:x2]
+    img = Image.fromarray(crop).convert("RGB")
+    
+    inputs = processor(images=img, return_tensors="pt").to(config.device)
+    if config.fp16 and config.device == "cuda":
+        inputs['pixel_values'] = inputs['pixel_values'].half()
+        
+    with torch.no_grad():
+        features = model(**inputs).pooler_output
+        
+    return features.squeeze().cpu().tolist()
+
+def run_local_ocr(frame_np, bbox, ocr):
+    h, w, _ = frame_np.shape
+    x1, y1, x2, y2 = bbox
+    x1, y1, x2, y2 = int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)
+    
+    if x2 <= x1 or y2 <= y1:
+        return ""
+        
+    crop = frame_np[y1:y2, x1:x2]
+    result = ocr.ocr(crop, cls=config.ocr_use_angle_cls)
+    if not result or not result[0]:
+        return ""
+    texts = [line[1][0] for line in result[0] if line and line[1]]
+    return " ".join(texts)
+
 def process_video(video_path: Path, shots_path: Path, out_dir: Path):
     ensure_dir(out_dir)
     tracklets_file = out_dir / "tracklets.json"
@@ -72,16 +115,17 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
     sample_interval = max(1, int(video_fps / config.shot_fps))
     
     # Load Models
-    print(f"[Module 2A] Loading YOLOv8...")
-    yolo_model = YOLO('yolov8n.pt') # You might want yolov8s.pt or others depending on VRAM
+    print(f"[Module 2A] Loading Models...")
+    yolo_model = YOLO(config.yolo_model)
     yolo_model.to(config.device)
     
-    # Placeholder for ReID embedding extractor (e.g., FastReID). 
-    # For this script, we'll use a mocked embedding function or a lightweight feature extractor.
-    def get_reid_embedding(frame, bbox):
-        # In a real scenario, crop frame by bbox and run through FastReID.
-        # Here we mock a random vector to keep it runnable without a FastReID model file.
-        return np.random.rand(512).tolist()
+    siglip_processor = AutoImageProcessor.from_pretrained(config.siglip_model)
+    siglip_model = AutoModel.from_pretrained(config.siglip_model).to(config.device)
+    siglip_model.eval()
+    if config.fp16 and config.device == "cuda":
+        siglip_model.half()
+        
+    ocr = PaddleOCR(use_angle_cls=config.ocr_use_angle_cls, lang=config.ocr_lang)
     
     reid_pool = ReIDMemoryPool(ttl=config.reid_pool_ttl_sec)
     
@@ -93,24 +137,30 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
         "unified_id": None
     })
     
-    print("[Module 2A] Running YOLO tracking...")
+    static_objects = []
+    ocr_local = []
     
-    # Read shots info if needed
+    print("[Module 2A] Running YOLO tracking + Real SigLIP ReID...")
+    
     shots = []
     if shots_path and shots_path.exists():
         with open(shots_path, "r", encoding="utf-8") as f:
             shots = json.load(f)
             
+    def get_shot_id_from_ms(ms):
+        for s in shots:
+            if s["start_ms"] <= ms <= s["end_ms"]:
+                return s["shot_id"]
+        return "unknown"
+            
     frame_indices = range(0, len(vr), sample_interval)
     
-    # Batch processing frames to prevent OOM
+    # Batch processing
     batch_size = config.batch_size_gpu
     for i in range(0, len(frame_indices), batch_size):
         batch_indices = frame_indices[i:i+batch_size]
         frames = vr.get_batch(batch_indices).asnumpy()
         
-        # ByteTrack requires consecutive frames usually, but if sampling at 5FPS, it may struggle.
-        # Ultralytics track function handles this automatically.
         results = yolo_model.track(frames, persist=True, tracker="bytetrack.yaml", verbose=False)
         
         for j, res in enumerate(results):
@@ -121,7 +171,7 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
             if res.boxes is None or res.boxes.id is None:
                 continue
                 
-            boxes = res.boxes.xyxyn.cpu().numpy() # Normalized bbox
+            boxes = res.boxes.xyxyn.cpu().numpy() # [x1, y1, x2, y2]
             track_ids = res.boxes.id.int().cpu().numpy()
             classes = res.boxes.cls.int().cpu().numpy()
             names = res.names
@@ -130,8 +180,8 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
                 str_tid = str(tid)
                 label = names[cls_idx]
                 
-                # Get ReID embedding
-                emb = get_reid_embedding(frames[j], box)
+                # Get REAL ReID embedding via SigLIP crop
+                emb = crop_and_embed(frames[j], box, siglip_processor, siglip_model)
                 
                 # If first time seeing this track_id, try to match in ReID pool
                 if tracklets_dict[str_tid]["unified_id"] is None:
@@ -148,7 +198,18 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
                     "bbox": box.tolist()
                 })
                 
-                # Update ReID pool with latest embedding
+                # Local OCR for specific trigger classes (e.g. book, signboard)
+                if label in config.ocr_trigger_classes:
+                    text = run_local_ocr(frames[j], box, ocr)
+                    if text:
+                        ocr_local.append({
+                            "track_id": unified_tid,
+                            "frame_idx": int(actual_idx),
+                            "bbox_crop_path": f"crop_{unified_tid}_{actual_idx}.jpg",
+                            "recognized_text": text
+                        })
+                
+                # Update ReID pool
                 reid_pool.add(unified_tid, emb, current_ms)
                 
         # Prevent OOM
@@ -160,7 +221,6 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
             
     print("[Module 2A] Finalizing tracklets...")
     final_tracklets = []
-    static_objects = []
     
     for tid, data in tracklets_dict.items():
         if not data["bbox_trajectory"]:
@@ -171,23 +231,36 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
         
         # Spatial Variance for Static/Dynamic Split
         bboxes = np.array([b["bbox"] for b in data["bbox_trajectory"]])
-        # bbox is [x1, y1, x2, y2] normalized
         centers_x = (bboxes[:, 0] + bboxes[:, 2]) / 2.0
         centers_y = (bboxes[:, 1] + bboxes[:, 3]) / 2.0
         std_x = np.std(centers_x)
         std_y = np.std(centers_y)
         
-        if std_x < 0.02 and std_y < 0.02: # Threshold for static
+        if std_x < 0.02 and std_y < 0.02:
+            # Re-extract vector from middle frame to ensure we have a good representation
+            mid_idx = data["bbox_trajectory"][len(data["bbox_trajectory"])//2]["frame_idx"]
+            mid_bbox = data["bbox_trajectory"][len(data["bbox_trajectory"])//2]["bbox"]
+            mid_frame = vr[mid_idx].asnumpy()
+            static_vec = crop_and_embed(mid_frame, mid_bbox, siglip_processor, siglip_model)
+            
+            # Find which shot it belongs to
+            shot_id = get_shot_id_from_ms(data["start_ms"])
+            
+            # Look for OCR
+            obj_ocr = [o["recognized_text"] for o in ocr_local if o["track_id"] == data["unified_id"]]
+            obj_ocr_text = obj_ocr[0] if obj_ocr else ""
+            
             static_objects.append({
-                "object_id": tid,
-                "shot_id": "unknown", # To be mapped by temporal overlap later
+                "object_id": f"static_{tid}",
+                "shot_id": shot_id,
                 "class_label": majority_class,
-                "bbox": bboxes[0].tolist(),
-                "siglip_vector": [] # Can be extracted later if needed
+                "bbox": mid_bbox,
+                "siglip_vector": static_vec,
+                "ocr_text": obj_ocr_text
             })
         else:
             final_tracklets.append({
-                "track_id": tid,
+                "track_id": data["unified_id"],
                 "unified_id": data["unified_id"],
                 "class_label": majority_class,
                 "start_ms": data["start_ms"],
@@ -205,7 +278,7 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
         },
         "tracklets": final_tracklets,
         "static_objects": static_objects,
-        "ocr_local": [] # OCR local can be added similarly by cropping frame and calling PaddleOCR
+        "ocr_local": ocr_local
     }
     
     with open(tracklets_file, "w", encoding="utf-8") as f:

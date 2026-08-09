@@ -139,7 +139,7 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
     if config.fp16 and config.device == "cuda":
         siglip_model.half()
 
-    ocr = PaddleOCR(use_angle_cls=config.ocr_use_angle_cls, lang=config.ocr_lang)
+    ocr = PaddleOCR(use_angle_cls=config.ocr_use_angle_cls, lang=config.ocr_lang, use_gpu=False)
 
     reid_pool = ReIDMemoryPool(ttl=config.reid_pool_ttl_sec)
 

@@ -282,7 +282,7 @@ def main():
     print(f"[2] Loading models on {config.device}...")
     img_processor, img_model = load_siglip()
     audio_extractor, audio_model = load_wavlm()
-    ocr = PaddleOCR(use_angle_cls=config.ocr_use_angle_cls, lang=config.ocr_lang)
+    ocr = PaddleOCR(use_angle_cls=config.ocr_use_angle_cls, lang=config.ocr_lang, use_gpu=False)
     whisper_model = load_whisper(config.whisper_model, device=config.device)
     news_classifier = NewsSceneClassifier(config)
 

@@ -26,7 +26,7 @@ class ATSMEConfig:
     num_workers: int = 8
     fp16: bool = True
     device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu"
-    ocr_lang: str = "en,vi"
+    ocr_lang: str = "vi"
     ocr_use_angle_cls: bool = True
     ocr_keyframes_per_shot: int = 3
     asr_language: str = "vi"

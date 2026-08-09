@@ -12,8 +12,7 @@ import soundfile as sf
 import numpy as np
 from sklearn.cluster import AgglomerativeClustering
 
-from scenedetect import VideoManager, SceneManager
-from scenedetect.detectors import ContentDetector
+from scenedetect import detect, ContentDetector
 try:
     from transnetv2 import TransNetV2
 except ImportError:
@@ -42,17 +41,12 @@ def get_video_fps(video_path: Path) -> float:
     return fps
 
 def detect_shots_pyscene(video_path: Path) -> List[tuple]:
-    video_manager = VideoManager([str(video_path)])
-    scene_manager = SceneManager()
-    scene_manager.add_detector(ContentDetector(threshold=config.shot_detector_content_threshold))
-    video_manager.start()
-    scene_manager.detect_scenes(frame_source=video_manager)
+    scene_list = detect(str(video_path), ContentDetector(threshold=config.shot_detector_content_threshold))
     shot_list = []
-    for scene in scene_manager.get_scene_list():
-        start_ms = video_manager.get_frame_timecode(scene[0]).get_milliseconds()
-        end_ms = video_manager.get_frame_timecode(scene[1]).get_milliseconds()
+    for scene in scene_list:
+        start_ms = scene[0].get_milliseconds()
+        end_ms = scene[1].get_milliseconds()
         shot_list.append((start_ms, end_ms, scene[0].get_frames(), scene[1].get_frames()))
-    video_manager.release()
     return shot_list
 
 def detect_shots_transnet(video_path: Path, fps: float) -> List[tuple]:

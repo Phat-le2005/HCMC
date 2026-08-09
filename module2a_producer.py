@@ -155,15 +155,37 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
             
     frame_indices = range(0, len(vr), sample_interval)
     
-    # Batch processing
+    # Batch processing with error recovery
     batch_size = config.batch_size_gpu
-    for i in range(0, len(frame_indices), batch_size):
+    total_frames = len(frame_indices)
+    processed = 0
+    
+    for i in range(0, total_frames, batch_size):
         batch_indices = frame_indices[i:i+batch_size]
-        frames = vr.get_batch(batch_indices).asnumpy()
         
-        results = yolo_model.track(frames, persist=True, tracker="bytetrack.yaml", verbose=False)
+        try:
+            frames = vr.get_batch(batch_indices).asnumpy()
+        except Exception as e:
+            print(f"[Module 2A] Warning: Failed to read batch at index {i}: {e}. Skipping batch.")
+            continue
+        
+        try:
+            results = yolo_model.track(frames, persist=True, tracker="bytetrack.yaml", verbose=False)
+        except Exception as e:
+            print(f"[Module 2A] Warning: Batch YOLO tracking failed at batch {i//batch_size}: {e}")
+            print(f"[Module 2A] Falling back to frame-by-frame tracking for this batch...")
+            results = []
+            for single_frame in frames:
+                try:
+                    single_result = yolo_model.track(single_frame, persist=True, tracker="bytetrack.yaml", verbose=False)
+                    results.extend(single_result)
+                except Exception as e2:
+                    print(f"[Module 2A] Warning: Single frame tracking also failed: {e2}. Skipping frame.")
+                    results.append(None)
         
         for j, res in enumerate(results):
+            if res is None:
+                continue
             actual_idx = batch_indices[j]
             current_ms = (actual_idx / video_fps) * 1000
             reid_pool.clean(current_ms)
@@ -218,6 +240,10 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
         gc.collect()
         if config.device == "cuda":
             torch.cuda.empty_cache()
+        
+        processed += len(batch_indices)
+        if processed % (batch_size * 5) == 0 or processed >= total_frames:
+            print(f"[Module 2A] Progress: {processed}/{total_frames} frames ({100*processed/total_frames:.1f}%)")
             
     print("[Module 2A] Finalizing tracklets...")
     final_tracklets = []

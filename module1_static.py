@@ -30,6 +30,17 @@ from news_classifier import NewsSceneClassifier
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
 
+def get_video_fps(video_path: Path) -> float:
+    """Extract actual FPS from video file using OpenCV."""
+    import cv2
+    cap = cv2.VideoCapture(str(video_path))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    if fps <= 0:
+        print(f"Warning: Could not read FPS from {video_path}, defaulting to 25.0")
+        return 25.0
+    return fps
+
 def detect_shots_pyscene(video_path: Path) -> List[tuple]:
     video_manager = VideoManager([str(video_path)])
     scene_manager = SceneManager()
@@ -44,7 +55,7 @@ def detect_shots_pyscene(video_path: Path) -> List[tuple]:
     video_manager.release()
     return shot_list
 
-def detect_shots_transnet(video_path: Path) -> List[tuple]:
+def detect_shots_transnet(video_path: Path, fps: float) -> List[tuple]:
     if TransNetV2 is None:
         print("Warning: TransNetV2 not installed. Skipping hybrid SBD.")
         return []
@@ -54,26 +65,23 @@ def detect_shots_transnet(video_path: Path) -> List[tuple]:
     video_frames, single_frame_predictions, all_frame_predictions = model.predict_video(str(video_path))
     scenes = model.predictions_to_scenes(single_frame_predictions)
     
-    import cv2
-    cap = cv2.VideoCapture(str(video_path))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    cap.release()
-    
     shot_list = []
     for start_frame, end_frame in scenes:
         start_ms = (start_frame / fps) * 1000
         end_ms = (end_frame / fps) * 1000
-        shot_list.append((start_ms, end_ms, start_frame, end_frame))
+        shot_list.append((start_ms, end_ms, int(start_frame), int(end_frame)))
     return shot_list
 
-def merge_shot_boundaries(pyscene_shots, transnet_shots):
+def merge_shot_boundaries(pyscene_shots, transnet_shots, fps: float):
+    """Merge shot boundaries from two detectors using actual video FPS."""
     if not transnet_shots:
-        return pyscene_shots
+        # Convert tuples to dicts
+        return [{"shot_id": f"shot_{i}", "start_ms": s[0], "end_ms": s[1], "start_frame": s[2], "end_frame": s[3]} for i, s in enumerate(pyscene_shots)]
         
     all_boundaries = set()
     for s in pyscene_shots + transnet_shots:
-        all_boundaries.add(s[0])
-        all_boundaries.add(s[1])
+        all_boundaries.add(s[0])  # start_ms
+        all_boundaries.add(s[1])  # end_ms
         
     sorted_bounds = sorted(list(all_boundaries))
     merged_bounds = []
@@ -87,7 +95,6 @@ def merge_shot_boundaries(pyscene_shots, transnet_shots):
                 merged_bounds.append(b)
                 
     final_shots = []
-    import cv2 # Approximation for frames
     for i in range(len(merged_bounds) - 1):
         start_ms = merged_bounds[i]
         end_ms = merged_bounds[i+1]
@@ -95,8 +102,8 @@ def merge_shot_boundaries(pyscene_shots, transnet_shots):
             "shot_id": f"shot_{i}",
             "start_ms": start_ms,
             "end_ms": end_ms,
-            "start_frame": int(start_ms / (1000/25)), # approx 25fps for fallback
-            "end_frame": int(end_ms / (1000/25))
+            "start_frame": int(start_ms * fps / 1000.0),
+            "end_frame": int(end_ms * fps / 1000.0)
         })
     return final_shots
 
@@ -231,10 +238,12 @@ def main():
         with open(shots_file, "r", encoding="utf-8") as f:
             shots = json.load(f)
     else:
+        video_fps = get_video_fps(video_path)
+        print(f"    Detected video FPS: {video_fps}")
         pyscene_shots = detect_shots_pyscene(video_path)
         if config.use_hybrid_sbd:
-            transnet_shots = detect_shots_transnet(video_path)
-            shots = merge_shot_boundaries(pyscene_shots, transnet_shots)
+            transnet_shots = detect_shots_transnet(video_path, video_fps)
+            shots = merge_shot_boundaries(pyscene_shots, transnet_shots, video_fps)
         else:
             shots = [{"shot_id": f"shot_{i}", "start_ms": s[0], "end_ms": s[1], "start_frame": s[2], "end_frame": s[3]} for i, s in enumerate(pyscene_shots)]
             

@@ -26,6 +26,120 @@ def load_json_safe(path: Path):
         print(f"Error loading {path}: {e}")
         return None
 
+def validate_record(record: dict, schema: dict, record_name: str) -> bool:
+    """Validate a single record against expected field types and dimensions."""
+    valid = True
+    for field_name, spec in schema.items():
+        value = record.get(field_name)
+        
+        # Check required fields
+        if spec.get("required") and value is None:
+            print(f"  [WARN] {record_name}: Missing required field '{field_name}'")
+            valid = False
+            continue
+        
+        if value is None:
+            continue
+            
+        # Check type
+        expected_type = spec.get("type")
+        if expected_type and not isinstance(value, expected_type):
+            print(f"  [WARN] {record_name}: Field '{field_name}' expected {expected_type.__name__}, got {type(value).__name__}")
+            valid = False
+            
+        # Check vector dimension
+        expected_dim = spec.get("dim")
+        if expected_dim and isinstance(value, list) and len(value) != expected_dim:
+            print(f"  [WARN] {record_name}: Vector '{field_name}' expected dim={expected_dim}, got dim={len(value)}")
+            valid = False
+            
+        # Check max string length (for Milvus VARCHAR)
+        max_len = spec.get("max_len")
+        if max_len and isinstance(value, str) and len(value) > max_len:
+            print(f"  [WARN] {record_name}: String '{field_name}' exceeds max_len={max_len} (len={len(value)}), truncating")
+            record[field_name] = value[:max_len]
+            
+    return valid
+
+def validate_all_data(db_data: dict) -> dict:
+    """Pre-validate all data before DB insertion. Returns sanitized data with stats."""
+    
+    SCENE_SCHEMA = {
+        "scene_id": {"type": str, "required": True, "max_len": 100},
+        "start_ms": {"type": (int, float), "required": True},
+        "end_ms": {"type": (int, float), "required": True},
+        "news_type": {"type": str, "max_len": 50},
+    }
+    SHOT_SCHEMA = {
+        "shot_id": {"type": str, "required": True, "max_len": 100},
+        "start_ms": {"type": (int, float), "required": True},
+        "global_ocr": {"type": str},
+        "global_asr": {"type": str},
+        "image_vector": {"type": list, "dim": 768},
+        "audio_vector": {"type": list, "dim": 768},
+    }
+    TRACKLET_SCHEMA = {
+        "track_id": {"type": str, "required": True, "max_len": 100},
+        "class_label": {"type": str, "required": True, "max_len": 100},
+        "start_ms": {"type": (int, float), "required": True},
+        "end_ms": {"type": (int, float), "required": True},
+    }
+    STATIC_OBJ_SCHEMA = {
+        "object_id": {"type": str, "required": True, "max_len": 100},
+        "shot_id": {"type": str, "max_len": 100},
+        "class_label": {"type": str, "required": True, "max_len": 100},
+        "siglip_vector": {"type": list, "dim": 768},
+    }
+    ACTION_SCHEMA = {
+        "track_id": {"type": str, "required": True, "max_len": 100},
+        "action_label": {"type": str, "required": True, "max_len": 100},
+        "action_vector": {"type": list, "dim": 256},
+    }
+
+    stats = {"scenes_valid": 0, "scenes_invalid": 0, "shots_valid": 0, "shots_invalid": 0,
+             "tracklets_valid": 0, "tracklets_invalid": 0, "static_valid": 0, "static_invalid": 0,
+             "actions_valid": 0, "actions_invalid": 0}
+    
+    print("[Module 3] Validating data before DB insertion...")
+    
+    for sc in db_data.get("scenes", []):
+        if validate_record(sc, SCENE_SCHEMA, f"Scene[{sc.get('scene_id', '?')}]"):
+            stats["scenes_valid"] += 1
+        else:
+            stats["scenes_invalid"] += 1
+    
+    for sh in db_data.get("shots", []):
+        if validate_record(sh, SHOT_SCHEMA, f"Shot[{sh.get('shot_id', '?')}]"):
+            stats["shots_valid"] += 1
+        else:
+            stats["shots_invalid"] += 1
+    
+    for tr in db_data.get("tracklets", []):
+        if validate_record(tr, TRACKLET_SCHEMA, f"Tracklet[{tr.get('track_id', '?')}]"):
+            stats["tracklets_valid"] += 1
+        else:
+            stats["tracklets_invalid"] += 1
+    
+    for so in db_data.get("static_objects", []):
+        if validate_record(so, STATIC_OBJ_SCHEMA, f"StaticObj[{so.get('object_id', '?')}]"):
+            stats["static_valid"] += 1
+        else:
+            stats["static_invalid"] += 1
+    
+    for ac in db_data.get("actions", []):
+        if validate_record(ac, ACTION_SCHEMA, f"Action[{ac.get('track_id', '?')}]"):
+            stats["actions_valid"] += 1
+        else:
+            stats["actions_invalid"] += 1
+    
+    total_invalid = stats["scenes_invalid"] + stats["shots_invalid"] + stats["tracklets_invalid"] + stats["static_invalid"] + stats["actions_invalid"]
+    print(f"[Module 3] Validation complete: {total_invalid} issue(s) found.")
+    for k, v in stats.items():
+        if v > 0:
+            print(f"    {k}: {v}")
+    
+    return stats
+
 def build_graph(input_dir: Path, output_dir: Path, dry_run: bool = False):
     print(f"[Module 3] Loading data from {input_dir}")
     
@@ -69,6 +183,9 @@ def build_graph(input_dir: Path, output_dir: Path, dry_run: bool = False):
         "actions": actions,
         "shot_to_tracklets": shot_to_tracklets
     }
+    
+    # Always validate data format before any output
+    validation_stats = validate_all_data(db_data)
     
     if dry_run:
         print("[Module 3] DRY-RUN MODE: Skipping actual DB ingestion.")

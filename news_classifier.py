@@ -23,7 +23,7 @@ class NewsSceneClassifier:
         self.text_embeddings = self._precompute_text_embeddings()
 
     def _precompute_text_embeddings(self):
-        inputs = self.tokenizer(self.prompts, padding="max_length", return_tensors="pt").to(self.device)
+        inputs = self.tokenizer(self.prompts, padding=True, truncation=True, return_tensors="pt").to(self.device)
         with torch.no_grad():
             text_features = self.model.get_text_features(**inputs)
             if self.config.fp16 and self.device == "cuda":

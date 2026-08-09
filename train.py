@@ -42,10 +42,11 @@ def process_video(video_path: Path):
         "--tracklets", str(tracklets_file)
     ])
     
-    # 4. Graph Builder
+    # 4. Graph Builder (dry-run by default — no DB on Kaggle)
     run_module("module3_graph_builder.py", [
         "--input-dir", config.intermediate_dir,
-        "--output-dir", config.output_dir
+        "--output-dir", config.output_dir,
+        "--dry-run"
     ])
     
     log.info(f"--- Completed Video: {video_path.name} ---")

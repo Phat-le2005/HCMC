@@ -38,7 +38,6 @@ ffmpeg-python>=0.2.0              # Python bindings (ffmpeg system binary needed
 soundfile>=0.12.0
 scikit-learn>=1.4.0
 decord>=0.6.0
-transnetv2>=1.0.0
 
 # ── Database Clients ──────────────────────────────────────────────────────────
 neo4j>=5.14.0

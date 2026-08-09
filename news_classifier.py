@@ -26,6 +26,9 @@ class NewsSceneClassifier:
         inputs = self.tokenizer(self.prompts, padding=True, truncation=True, return_tensors="pt").to(self.device)
         with torch.no_grad():
             text_features = self.model.get_text_features(**inputs)
+            if not isinstance(text_features, torch.Tensor):
+                text_features = text_features[0] if isinstance(text_features, tuple) else text_features.pooler_output
+                
             if self.config.fp16 and self.device == "cuda":
                 text_features = text_features.half()
             # Normalize
@@ -45,6 +48,9 @@ class NewsSceneClassifier:
             
         with torch.no_grad():
             image_features = self.model.get_image_features(**inputs)
+            if not isinstance(image_features, torch.Tensor):
+                image_features = image_features[0] if isinstance(image_features, tuple) else image_features.pooler_output
+                
             if self.config.fp16 and self.device == "cuda":
                 image_features = image_features.half()
             

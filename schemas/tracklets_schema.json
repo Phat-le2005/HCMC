@@ -1,0 +1,70 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Tracklets Schema",
+  "type": "object",
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "video_id": {"type": "string"},
+        "fps": {"type": "number"},
+        "resolution": {
+          "type": "object",
+          "properties": {"width": {"type": "integer"}, "height": {"type": "integer"}, "unit": {"type": "string", "enum": ["pixel"]}},
+          "required": ["width", "height", "unit"]
+        },
+        "duration_ms": {"type": "integer"}
+      },
+      "required": ["video_id", "fps", "resolution", "duration_ms"]
+    },
+    "tracklets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "track_id": {"type": "string"},
+          "unified_id": {"type": "string"},
+          "class_label": {"type": "string"},
+          "start_ms": {"type": "integer"},
+          "end_ms": {"type": "integer"},
+          "bbox_trajectory": {
+            "type": "array",
+            "items": {"type": "object", "properties": {"frame_idx": {"type": "integer"}, "bbox": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}},
+            "description": "[x, y, w, h] normalized to 0‑1"
+          },
+          "reid_confidence": {"type": "number"}
+        },
+        "required": ["track_id", "class_label", "start_ms", "end_ms", "bbox_trajectory"]
+      }
+    },
+    "static_objects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "object_id": {"type": "string"},
+          "shot_id": {"type": "string"},
+          "class_label": {"type": "string"},
+          "bbox": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+          "siglip_vector": {"type": "array", "items": {"type": "number"}},
+          "ocr_text": {"type": "string"}
+        },
+        "required": ["object_id", "shot_id", "class_label", "bbox", "siglip_vector"]
+      }
+    },
+    "ocr_local": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "track_id": {"type": "string"},
+          "frame_idx": {"type": "integer"},
+          "bbox_crop_path": {"type": "string"},
+          "recognized_text": {"type": "string"}
+        },
+        "required": ["track_id", "frame_idx", "bbox_crop_path"]
+      }
+    }
+  },
+  "required": ["metadata", "tracklets"]
+}

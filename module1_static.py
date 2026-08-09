@@ -44,8 +44,8 @@ def detect_shots_pyscene(video_path: Path) -> List[tuple]:
     scene_list = detect(str(video_path), ContentDetector(threshold=config.shot_detector_content_threshold))
     shot_list = []
     for scene in scene_list:
-        start_ms = scene[0].get_milliseconds()
-        end_ms = scene[1].get_milliseconds()
+        start_ms = scene[0].get_seconds() * 1000.0
+        end_ms = scene[1].get_seconds() * 1000.0
         shot_list.append((start_ms, end_ms, scene[0].get_frames(), scene[1].get_frames()))
     return shot_list
 

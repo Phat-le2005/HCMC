@@ -262,6 +262,15 @@ def run_whisper(audio_path: Path, model):
         print(f"Whisper error on {audio_path}: {e}")
         return ""
 
+def free_vram(*models):
+    """Unload models from GPU and free VRAM."""
+    for m in models:
+        if m is not None:
+            del m
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
 def main():
     parser = argparse.ArgumentParser(description="Module 1 – Static Pipeline")
     parser.add_argument("--video", type=str, required=True, help="Path to input video file")
@@ -278,7 +287,10 @@ def main():
 
     shots_file = out_dir / "shots.json"
 
-    print("[1] Detecting shots...")
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 0: Shot Boundary Detection (CPU only)
+    # ═══════════════════════════════════════════════════════════════════
+    print("[Stage 0] Detecting shots...")
     if shots_file.exists():
         with open(shots_file, "r", encoding="utf-8") as f:
             shots = json.load(f)
@@ -291,90 +303,170 @@ def main():
             shots = merge_shot_boundaries(pyscene_shots, transnet_shots, video_fps)
         else:
             shots = [{"shot_id": f"shot_{i}", "start_ms": s[0], "end_ms": s[1], "start_frame": s[2], "end_frame": s[3]} for i, s in enumerate(pyscene_shots)]
-
         with open(shots_file, "w", encoding="utf-8") as f:
             json.dump(shots, f, ensure_ascii=False, indent=2)
 
     if not shots:
         print("[WARN] No shots detected. Exiting.")
         return
-
     print(f"    Found {len(shots)} shots.")
-    print(f"[2] Loading models on {config.device}...")
-    img_processor, img_model = load_siglip()
-    audio_extractor, audio_model = load_wavlm()
-    ocr_engine = HybridOCREngine(device=config.device)
-    ocr_corrector = OCRPostProcessor(device=config.device, fp16=config.fp16)
-    whisper_model = load_whisper(config.whisper_model, device=config.device)
-    news_classifier = NewsSceneClassifier(config)
 
-    fused_vectors = []
-
-    # Process shots with checkpointing
-    for idx, shot in enumerate(shots):
+    # Extract all keyframes and audio segments (CPU, ffmpeg)
+    print("[Stage 0] Extracting keyframes & audio segments...")
+    for shot in shots:
         shot_id = shot["shot_id"]
+        if "image_vector" in shot:
+            continue  # Already processed
+        extract_multi_keyframes(video_path, shot["start_ms"], shot["end_ms"], shot_id, keyframe_dir)
+        extract_audio_segment(video_path, shot["start_ms"], shot["end_ms"], shot_id, audio_dir)
 
-        # Check if already processed
-        if "global_ocr" in shot and "global_asr" in shot and "news_type" in shot:
-            fused = shot.get("image_vector", []) + shot.get("audio_vector", [])
-            if fused:
-                fused_vectors.append(fused)
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 1: Image Embeddings + News Classification (SigLIP ~4.5GB)
+    # ═══════════════════════════════════════════════════════════════════
+    print("[Stage 1] SigLIP: Image embeddings + News classification...")
+    img_processor, img_model = load_siglip()
+    news_classifier = NewsSceneClassifier(config)  # Shares SigLIP weights
+
+    for idx, shot in enumerate(shots):
+        if "image_vector" in shot:
             continue
-
-        key_paths = extract_multi_keyframes(video_path, shot["start_ms"], shot["end_ms"], shot_id, keyframe_dir)
+        shot_id = shot["shot_id"]
+        key_paths = list(keyframe_dir.glob(f"{shot_id}_k*.jpg"))
+        key_paths.sort()
 
         if not key_paths:
-            print(f"  [WARN] No keyframes extracted for {shot_id}, skipping.")
-            shot["global_ocr"] = ""
-            shot["global_asr"] = ""
-            shot["news_type"] = "unknown"
             shot["image_vector"] = [0.0] * 768
-            shot["audio_vector"] = [0.0] * 768
+            shot["news_type"] = "unknown"
+            shot["image_vector_path"] = ""
             continue
 
         primary_k_path = key_paths[len(key_paths)//2]
-
-        img_vec = compute_image_vector(primary_k_path, img_processor, img_model)
-
-        audio_path = extract_audio_segment(video_path, shot["start_ms"], shot["end_ms"], shot_id, audio_dir)
-        audio_vec = compute_audio_vector(audio_path, audio_extractor, audio_model)
-
-        fused = img_vec + audio_vec
-        fused_vectors.append(fused)
-
+        shot["image_vector"] = compute_image_vector(primary_k_path, img_processor, img_model)
         shot["image_vector_path"] = str(primary_k_path)
-        shot["audio_path"] = str(audio_path)
-        shot["image_vector"] = img_vec
-        shot["audio_vector"] = audio_vec
-        raw_ocr = run_ocr_multi(key_paths, ocr_engine)
-        shot["global_ocr_raw"] = raw_ocr
-        shot["global_ocr"] = ocr_corrector.correct(raw_ocr) if raw_ocr else ""
-        shot["global_asr"] = run_whisper(audio_path, whisper_model)
 
-        # News Classification (Zero-shot)
         news_result = news_classifier.classify_image(str(primary_k_path))
         shot["news_type"] = news_result["label"]
 
-        # Incremental save every 5 shots
-        if (idx + 1) % 5 == 0 or idx == len(shots) - 1:
-            with open(shots_file, "w", encoding="utf-8") as f:
-                json.dump(shots, f, ensure_ascii=False, indent=2)
-            print(f"  [Progress] {idx+1}/{len(shots)} shots processed.")
+        if (idx + 1) % 20 == 0:
+            print(f"  [Stage 1] {idx+1}/{len(shots)}")
 
-        # Periodic VRAM cleanup
-        if (idx + 1) % 10 == 0:
-            gc.collect()
-            if config.device == "cuda":
-                torch.cuda.empty_cache()
+    free_vram(img_model, news_classifier)
+    del img_processor, img_model, news_classifier
+    print("  [Stage 1] Done. SigLIP unloaded.")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 2: Audio Embeddings (WavLM ~0.4GB)
+    # ═══════════════════════════════════════════════════════════════════
+    print("[Stage 2] WavLM: Audio embeddings...")
+    audio_extractor, audio_model = load_wavlm()
+
+    for idx, shot in enumerate(shots):
+        if "audio_vector" in shot:
+            continue
+        shot_id = shot["shot_id"]
+        audio_path = audio_dir / f"{shot_id}.wav"
+        shot["audio_vector"] = compute_audio_vector(audio_path, audio_extractor, audio_model)
+        shot["audio_path"] = str(audio_path)
+
+    free_vram(audio_model)
+    del audio_extractor, audio_model
+    print("  [Stage 2] Done. WavLM unloaded.")
+
+    # Save checkpoint
+    with open(shots_file, "w", encoding="utf-8") as f:
+        json.dump(shots, f, ensure_ascii=False, indent=2)
+    print("  [Checkpoint] Embeddings saved.")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 3: OCR — PaddleOCR detect + VietOCR recognize (CPU/light GPU)
+    # ═══════════════════════════════════════════════════════════════════
+    print("[Stage 3] OCR: PaddleOCR detect → VietOCR recognize...")
+    ocr_engine = HybridOCREngine(device=config.device)
+
+    for idx, shot in enumerate(shots):
+        if "global_ocr_raw" in shot:
+            continue
+        shot_id = shot["shot_id"]
+        key_paths = list(keyframe_dir.glob(f"{shot_id}_k*.jpg"))
+        key_paths.sort()
+
+        if not key_paths:
+            shot["global_ocr_raw"] = ""
+            shot["global_ocr"] = ""
+            continue
+
+        shot["global_ocr_raw"] = run_ocr_multi(key_paths, ocr_engine)
+
+        if (idx + 1) % 20 == 0:
+            print(f"  [Stage 3] {idx+1}/{len(shots)}")
+
+    free_vram(ocr_engine)
+    del ocr_engine
+    print("  [Stage 3] Done. OCR engine unloaded.")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 4: OCR Correction — Qwen2.5-1.5B (~3GB)
+    # ═══════════════════════════════════════════════════════════════════
+    print("[Stage 4] Qwen2.5-1.5B: OCR spelling correction...")
+    ocr_corrector = OCRPostProcessor(device=config.device, fp16=config.fp16)
+
+    for idx, shot in enumerate(shots):
+        if "global_ocr" in shot:
+            continue
+        raw = shot.get("global_ocr_raw", "")
+        shot["global_ocr"] = ocr_corrector.correct(raw) if raw else ""
+
+        if (idx + 1) % 20 == 0:
+            print(f"  [Stage 4] {idx+1}/{len(shots)}")
+
+    free_vram(ocr_corrector)
+    del ocr_corrector
+    print("  [Stage 4] Done. Qwen unloaded.")
+
+    # Save checkpoint
+    with open(shots_file, "w", encoding="utf-8") as f:
+        json.dump(shots, f, ensure_ascii=False, indent=2)
+    print("  [Checkpoint] OCR saved.")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 5: ASR — Whisper large-v3 (~2.9GB)
+    # ═══════════════════════════════════════════════════════════════════
+    print("[Stage 5] Whisper: ASR transcription...")
+    whisper_model = load_whisper(config.whisper_model, device=config.device)
+
+    for idx, shot in enumerate(shots):
+        if "global_asr" in shot:
+            continue
+        shot_id = shot["shot_id"]
+        audio_path = audio_dir / f"{shot_id}.wav"
+        shot["global_asr"] = run_whisper(audio_path, whisper_model)
+
+        if (idx + 1) % 20 == 0:
+            print(f"  [Stage 5] {idx+1}/{len(shots)}")
+
+    free_vram(whisper_model)
+    del whisper_model
+    print("  [Stage 5] Done. Whisper unloaded.")
 
     # Final save
     with open(shots_file, "w", encoding="utf-8") as f:
         json.dump(shots, f, ensure_ascii=False, indent=2)
+    print("  [Checkpoint] ASR saved.")
 
-    print("[3] Clustering shots into scenes...")
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 6: Scene Clustering (CPU only, no GPU needed)
+    # ═══════════════════════════════════════════════════════════════════
+    print("[Stage 6] Clustering shots into scenes...")
+    fused_vectors = []
+    for shot in shots:
+        iv = shot.get("image_vector", [])
+        av = shot.get("audio_vector", [])
+        if iv and av:
+            fused_vectors.append(iv + av)
+
     if len(fused_vectors) >= config.scene_min_shots:
         X = np.array(fused_vectors)
-        times = np.array([s["start_ms"] for s in shots if "image_vector" in s][:len(fused_vectors)])
+        times = np.array([s["start_ms"] for s in shots if s.get("image_vector")][:len(fused_vectors)])
         time_penalty = config.scene_cluster_alpha * np.abs(times[:, None] - times[None, :]) / 1000.0
 
         norms = np.linalg.norm(X, axis=1, keepdims=True)
@@ -391,7 +483,7 @@ def main():
         labels = clustering.fit_predict(distance)
 
         scenes_dict = {}
-        processed_shots = [s for s in shots if "image_vector" in s][:len(fused_vectors)]
+        processed_shots = [s for s in shots if s.get("image_vector")][:len(fused_vectors)]
         for label, shot in zip(labels, processed_shots):
             scenes_dict.setdefault(int(label), []).append(shot)
 

@@ -10,10 +10,10 @@ from decord import VideoReader, cpu
 import torch
 from PIL import Image
 from ultralytics import YOLO
-from paddleocr import PaddleOCR
 from transformers import AutoModel, AutoImageProcessor
 
 from config_v5 import config
+from ocr_engine import HybridOCREngine
 
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
@@ -96,22 +96,9 @@ def crop_and_embed(frame_np, bbox, processor, model):
     return features.squeeze().float().cpu().tolist()
 
 
-def run_local_ocr(frame_np, bbox, ocr):
-    h, w = frame_np.shape[:2]
-    x1, y1, x2, y2 = bbox
-    x1, y1, x2, y2 = int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)
-    if x2 <= x1 or y2 <= y1:
-        return ""
-    crop = frame_np[y1:y2, x1:x2]
-    try:
-        result = ocr.ocr(crop, cls=config.ocr_use_angle_cls)
-        if not result or not result[0]:
-            return ""
-        texts = [line[1][0] for line in result[0] if line and len(line) > 1 and line[1]]
-        return " ".join(texts)
-    except Exception as e:
-        return ""
-
+def run_local_ocr(frame_np, bbox, ocr_engine):
+    """Run 3-step OCR on a cropped region of a frame."""
+    return ocr_engine.recognize_crop(frame_np, bbox)
 
 def process_video(video_path: Path, shots_path: Path, out_dir: Path):
     ensure_dir(out_dir)
@@ -139,7 +126,7 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
     if config.fp16 and config.device == "cuda":
         siglip_model.half()
 
-    ocr = PaddleOCR(use_angle_cls=config.ocr_use_angle_cls, lang=config.ocr_lang, use_gpu=False)
+    ocr_engine = HybridOCREngine(device=config.device)
 
     reid_pool = ReIDMemoryPool(ttl=config.reid_pool_ttl_sec)
 
@@ -234,7 +221,7 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
                 })
 
                 if label in config.ocr_trigger_classes:
-                    text = run_local_ocr(frames[j], box, ocr)
+                    text = run_local_ocr(frames[j], box, ocr_engine)
                     if text:
                         ocr_local.append({
                             "track_id": unified_tid,

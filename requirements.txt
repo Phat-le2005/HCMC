@@ -28,7 +28,8 @@ einops>=0.8.0
 
 # ── OCR ───────────────────────────────────────────────────────────────────────
 paddlepaddle-gpu>=2.6.1           # PaddlePaddle GPU
-paddleocr==2.8.1
+paddleocr==2.8.1                  # Text detection only (rec=False)
+vietocr>=0.3.5                    # Vietnamese text recognition
 
 # ── ASR ───────────────────────────────────────────────────────────────────────
 openai-whisper>=20231117

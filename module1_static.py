@@ -19,11 +19,11 @@ except ImportError:
     TransNetV2 = None
 
 from transformers import AutoModel, AutoImageProcessor, AutoFeatureExtractor
-from paddleocr import PaddleOCR
 from whisper import load_model as load_whisper
 
 from config_v5 import config
 from news_classifier import NewsSceneClassifier
+from ocr_engine import HybridOCREngine
 
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
@@ -215,18 +215,9 @@ def compute_audio_vector(wav_path: Path, extractor, model) -> List[float]:
         pooled = hidden.mean(dim=1)  # (1, 768)
     return pooled.squeeze().float().cpu().tolist()
 
-def run_ocr_multi(image_paths: List[Path], ocr: PaddleOCR) -> str:
-    all_texts = set()
-    for img_path in image_paths:
-        try:
-            result = ocr.ocr(str(img_path), cls=config.ocr_use_angle_cls)
-            if not result or not result[0]:
-                continue
-            texts = [line[1][0] for line in result[0] if line and len(line) > 1 and line[1]]
-            all_texts.update(texts)
-        except Exception as e:
-            print(f"OCR error on {img_path}: {e}")
-    return " ".join(all_texts)
+def run_ocr_multi(image_paths: List[Path], ocr_engine: HybridOCREngine) -> str:
+    """Run 3-step OCR (Paddle detect → Crop+Pad → VietOCR) on multiple keyframes."""
+    return ocr_engine.recognize_multi([str(p) for p in image_paths])
 
 def run_whisper(audio_path: Path, model):
     if not audio_path.exists():
@@ -282,7 +273,7 @@ def main():
     print(f"[2] Loading models on {config.device}...")
     img_processor, img_model = load_siglip()
     audio_extractor, audio_model = load_wavlm()
-    ocr = PaddleOCR(use_angle_cls=config.ocr_use_angle_cls, lang=config.ocr_lang, use_gpu=False)
+    ocr_engine = HybridOCREngine(device=config.device)
     whisper_model = load_whisper(config.whisper_model, device=config.device)
     news_classifier = NewsSceneClassifier(config)
 
@@ -324,7 +315,7 @@ def main():
         shot["audio_path"] = str(audio_path)
         shot["image_vector"] = img_vec
         shot["audio_vector"] = audio_vec
-        shot["global_ocr"] = run_ocr_multi(key_paths, ocr)
+        shot["global_ocr"] = run_ocr_multi(key_paths, ocr_engine)
         shot["global_asr"] = run_whisper(audio_path, whisper_model)
 
         # News Classification (Zero-shot)

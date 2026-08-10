@@ -24,6 +24,7 @@ from whisper import load_model as load_whisper
 from config_v5 import config
 from news_classifier import NewsSceneClassifier
 from ocr_engine import HybridOCREngine
+from ocr_postprocess import OCRPostProcessor
 
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
@@ -274,6 +275,7 @@ def main():
     img_processor, img_model = load_siglip()
     audio_extractor, audio_model = load_wavlm()
     ocr_engine = HybridOCREngine(device=config.device)
+    ocr_corrector = OCRPostProcessor(device=config.device, fp16=config.fp16)
     whisper_model = load_whisper(config.whisper_model, device=config.device)
     news_classifier = NewsSceneClassifier(config)
 
@@ -315,7 +317,9 @@ def main():
         shot["audio_path"] = str(audio_path)
         shot["image_vector"] = img_vec
         shot["audio_vector"] = audio_vec
-        shot["global_ocr"] = run_ocr_multi(key_paths, ocr_engine)
+        raw_ocr = run_ocr_multi(key_paths, ocr_engine)
+        shot["global_ocr_raw"] = raw_ocr
+        shot["global_ocr"] = ocr_corrector.correct(raw_ocr) if raw_ocr else ""
         shot["global_asr"] = run_whisper(audio_path, whisper_model)
 
         # News Classification (Zero-shot)

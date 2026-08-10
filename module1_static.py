@@ -223,11 +223,40 @@ def run_ocr_multi(image_paths: List[Path], ocr_engine: HybridOCREngine) -> str:
 def run_whisper(audio_path: Path, model):
     if not audio_path.exists():
         return ""
+        
+    # Blacklist of common Whisper hallucinations in Vietnamese for empty/noisy audio
+    hallucinations = [
+        "ghiền mì gõ", "subscribe", "đăng ký kênh", "cảm ơn các bạn", 
+        "hẹn gặp lại", "theo dõi", "bản quyền thuộc về", "subtitles by",
+        "âm nhạc", "music"
+    ]
+    
     try:
-        result = model.transcribe(str(audio_path), language=config.asr_language)
+        # Tuning parameters for short audio clips to reduce hallucinations
+        result = model.transcribe(
+            str(audio_path), 
+            language=config.asr_language,
+            condition_on_previous_text=False,  # Prevent getting stuck in loops
+            no_speech_threshold=0.6,           # Be stricter on classifying silence
+            logprob_threshold=-1.0             # Reject low confidence predictions
+        )
+        
         text = result.get('text', '').strip()
+        
+        if not text:
+            return ""
+            
+        text_lower = text.lower()
+        
+        # Check against blacklist
+        for phrase in hallucinations:
+            if phrase in text_lower:
+                return ""
+                
+        # Remove too short or non-alphanumeric junk
         if len(text) < 3 and not text.isalnum():
             return ""
+            
         return text
     except Exception as e:
         print(f"Whisper error on {audio_path}: {e}")

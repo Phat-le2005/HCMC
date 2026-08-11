@@ -19,7 +19,7 @@ except ImportError:
     TransNetV2 = None
 
 from transformers import AutoModel, AutoImageProcessor, AutoFeatureExtractor
-from whisper import load_model as load_whisper
+from faster_whisper import WhisperModel
 
 from config_v5 import config
 from news_classifier import NewsSceneClassifier
@@ -220,47 +220,7 @@ def run_ocr_multi(image_paths: List[Path], ocr_engine: HybridOCREngine) -> str:
     """Run 3-step OCR (Paddle detect → Crop+Pad → VietOCR) on multiple keyframes."""
     return ocr_engine.recognize_multi([str(p) for p in image_paths])
 
-def run_whisper(audio_path: Path, model):
-    if not audio_path.exists():
-        return ""
-        
-    # Blacklist of common Whisper hallucinations in Vietnamese for empty/noisy audio
-    hallucinations = [
-        "ghiền mì gõ", "subscribe", "đăng ký kênh", "cảm ơn các bạn", 
-        "hẹn gặp lại", "theo dõi", "bản quyền thuộc về", "subtitles by",
-        "âm nhạc", "music"
-    ]
-    
-    try:
-        # Tuning parameters for short audio clips to reduce hallucinations
-        result = model.transcribe(
-            str(audio_path), 
-            language=config.asr_language,
-            condition_on_previous_text=False,  # Prevent getting stuck in loops
-            no_speech_threshold=0.6,           # Be stricter on classifying silence
-            logprob_threshold=-1.0             # Reject low confidence predictions
-        )
-        
-        text = result.get('text', '').strip()
-        
-        if not text:
-            return ""
-            
-        text_lower = text.lower()
-        
-        # Check against blacklist
-        for phrase in hallucinations:
-            if phrase in text_lower:
-                return ""
-                
-        # Remove too short or non-alphanumeric junk
-        if len(text) < 3 and not text.isalnum():
-            return ""
-            
-        return text
-    except Exception as e:
-        print(f"Whisper error on {audio_path}: {e}")
-        return ""
+
 
 def free_vram(*models):
     """Unload models from GPU and free VRAM."""
@@ -313,6 +273,13 @@ def main():
 
     # Extract all keyframes and audio segments (CPU, ffmpeg)
     print("[Stage 0] Extracting keyframes & audio segments...")
+    
+    # Extract full audio for Whisper
+    full_audio_path = audio_dir / "full_audio.wav"
+    if not full_audio_path.exists():
+        video_duration_ms = shots[-1]["end_ms"] if shots else 0
+        extract_audio_segment(video_path, 0, video_duration_ms, "full_audio", audio_dir)
+        
     for shot in shots:
         shot_id = shot["shot_id"]
         if "image_vector" in shot:
@@ -429,24 +396,57 @@ def main():
     print("  [Checkpoint] OCR saved.")
 
     # ═══════════════════════════════════════════════════════════════════
-    # Stage 5: ASR — Whisper large-v3 (~2.9GB)
+    # Stage 5: ASR — Faster-Whisper (~2.9GB)
     # ═══════════════════════════════════════════════════════════════════
-    print("[Stage 5] Whisper: ASR transcription...")
-    whisper_model = load_whisper(config.whisper_model, device=config.device)
-
-    for idx, shot in enumerate(shots):
-        if "global_asr" in shot:
-            continue
-        shot_id = shot["shot_id"]
-        audio_path = audio_dir / f"{shot_id}.wav"
-        shot["global_asr"] = run_whisper(audio_path, whisper_model)
-
-        if (idx + 1) % 20 == 0:
-            print(f"  [Stage 5] {idx+1}/{len(shots)}")
-
-    free_vram(whisper_model)
-    del whisper_model
-    print("  [Stage 5] Done. Whisper unloaded.")
+    print("[Stage 5] Whisper: ASR transcription (Full video + VAD)...")
+    full_audio_path = audio_dir / "full_audio.wav"
+    
+    if full_audio_path.exists():
+        compute_type = "float16" if config.fp16 and config.device == "cuda" else "float32"
+        whisper_model = WhisperModel(config.whisper_model, device=config.device, compute_type=compute_type)
+        
+        print("  [Stage 5] Transcribing full audio...")
+        segments, _ = whisper_model.transcribe(
+            str(full_audio_path),
+            language=config.asr_language,
+            vad_filter=True,
+            word_timestamps=True
+        )
+        
+        # Collect all words with timestamps
+        all_words = []
+        for segment in segments:
+            for word in segment.words:
+                all_words.append({
+                    "start_ms": word.start * 1000.0,
+                    "end_ms": word.end * 1000.0,
+                    "text": word.word
+                })
+        
+        print("  [Stage 5] Mapping words to shots...")
+        for shot in shots:
+            if "global_asr" in shot and shot["global_asr"]:
+                continue
+                
+            s_start = shot["start_ms"]
+            s_end = shot["end_ms"]
+            
+            shot_words = []
+            for w in all_words:
+                # Check overlap between word and shot
+                overlap_start = max(s_start, w["start_ms"])
+                overlap_end = min(s_end, w["end_ms"])
+                if overlap_end > overlap_start:
+                    shot_words.append(w["text"])
+                    
+            # Join words and clean up spacing
+            shot["global_asr"] = "".join(shot_words).strip()
+            
+        free_vram(whisper_model)
+        del whisper_model
+        print("  [Stage 5] Done. Whisper unloaded.")
+    else:
+        print("  [WARN] full_audio.wav not found. Skipping ASR.")
 
     # Final save
     with open(shots_file, "w", encoding="utf-8") as f:

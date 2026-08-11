@@ -90,7 +90,7 @@ def validate_all_data(db_data: dict) -> dict:
         "class_label": {"type": str, "required": True, "max_len": 100},
         "siglip_vector": {"type": list, "dim": 768},
     }
-    ACTION_SCHEMA = {
+    EVENT_SCHEMA = {
         "track_id": {"type": str, "required": True, "max_len": 100},
         "action_label": {"type": str, "required": True, "max_len": 100},
         "action_vector": {"type": list, "dim": 256},
@@ -98,7 +98,7 @@ def validate_all_data(db_data: dict) -> dict:
 
     stats = {"scenes_valid": 0, "scenes_invalid": 0, "shots_valid": 0, "shots_invalid": 0,
              "tracklets_valid": 0, "tracklets_invalid": 0, "static_valid": 0, "static_invalid": 0,
-             "actions_valid": 0, "actions_invalid": 0}
+             "events_valid": 0, "events_invalid": 0}
     
     print("[Module 3] Validating data before DB insertion...")
     
@@ -127,12 +127,12 @@ def validate_all_data(db_data: dict) -> dict:
             stats["static_invalid"] += 1
     
     for ac in db_data.get("actions", []):
-        if validate_record(ac, ACTION_SCHEMA, f"Action[{ac.get('track_id', '?')}]"):
-            stats["actions_valid"] += 1
+        if validate_record(ac, EVENT_SCHEMA, f"Event[{ac.get('track_id', '?')}]"):
+            stats["events_valid"] += 1
         else:
-            stats["actions_invalid"] += 1
+            stats["events_invalid"] += 1
     
-    total_invalid = stats["scenes_invalid"] + stats["shots_invalid"] + stats["tracklets_invalid"] + stats["static_invalid"] + stats["actions_invalid"]
+    total_invalid = stats["scenes_invalid"] + stats["shots_invalid"] + stats["tracklets_invalid"] + stats["static_invalid"] + stats["events_invalid"]
     print(f"[Module 3] Validation complete: {total_invalid} issue(s) found.")
     for k, v in stats.items():
         if v > 0:
@@ -195,12 +195,25 @@ def build_graph(input_dir: Path, output_dir: Path, dry_run: bool = False):
             "Shots": len(shots),
             "Tracklets": len(tracklets),
             "StaticObjects": len(static_objects),
-            "Actions": len(actions)
+            "Events": len(actions)
         }
+        
+        topology_export = {
+            "node_counts": graph_nodes,
+            "shot_to_tracklets": shot_to_tracklets,
+            "sample_records": {
+                "scene": scenes[0] if scenes else None,
+                "shot": shots[0] if shots else None,
+                "tracklet": tracklets[0] if tracklets else None,
+                "static_object": static_objects[0] if static_objects else None,
+                "event": actions[0] if actions else None
+            }
+        }
+        
         ensure_dir(output_dir)
         out_graph = output_dir / "graph_topology_dryrun.json"
         with open(out_graph, "w", encoding="utf-8") as f:
-            json.dump({"nodes": graph_nodes, "shot_to_tracklets": shot_to_tracklets}, f, indent=2)
+            json.dump(topology_export, f, indent=2)
         print(f"[Module 3] Exported Neo4j graph topology to {out_graph}")
         return
 
@@ -222,28 +235,45 @@ def build_graph(input_dir: Path, output_dir: Path, dry_run: bool = False):
         collections = get_milvus_collections(host=config.milvus_host, port=config.milvus_port)
         
         # Insert Scenes (Fused Vector)
-        scene_data = [[], [], [], [], [], []]
+        scene_data = [[], [], [], [], [], [], []]
         for sc in scenes:
             scene_data[0].append(sc["scene_id"])
             scene_data[1].append(metadata.get("video_id", ""))
             scene_data[2].append(sc["start_ms"])
             scene_data[3].append(sc["end_ms"])
             scene_data[4].append(sc.get("news_type", "unknown"))
-            # Need to get fused vector from shots
             fused_vec = [0.0]*1536
-            # Basic fallback: find first shot in scene
+            kp = ""
             for sh_id in sc.get("shot_ids", []):
                 for sh in shots:
                     if sh["shot_id"] == sh_id:
                         img_vec = sh.get("image_vector", [0.0]*768)
                         aud_vec = sh.get("audio_vector", [0.0]*768)
+                        kp = sh.get("image_vector_path", "")
                         if len(img_vec) == 768 and len(aud_vec) == 768:
                             fused_vec = img_vec + aud_vec
                         break
                 break
-            scene_data[5].append(fused_vec)
+            scene_data[5].append(kp)
+            scene_data[6].append(fused_vec)
         if scene_data[0]:
-            collections["scene_vectors"].insert(scene_data)
+            collections[config.milvus_scene_collection].insert(scene_data)
+            
+        # Insert Shots (Fused Vector)
+        shot_data = [[], [], [], [], [], [], []]
+        for sh in shots:
+            shot_data[0].append(sh["shot_id"])
+            shot_data[1].append(metadata.get("video_id", ""))
+            shot_data[2].append(sh["start_ms"])
+            shot_data[3].append(sh["end_ms"])
+            shot_data[4].append(sh.get("news_type", "unknown"))
+            shot_data[5].append(sh.get("image_vector_path", ""))
+            img_vec = sh.get("image_vector", [0.0]*768)
+            aud_vec = sh.get("audio_vector", [0.0]*768)
+            fused_vec = img_vec + aud_vec if len(img_vec) == 768 and len(aud_vec) == 768 else [0.0]*1536
+            shot_data[6].append(fused_vec)
+        if shot_data[0]:
+            collections[config.milvus_shot_collection].insert(shot_data)
             
         # Insert Static Objects (SigLIP Vector)
         obj_data = [[], [], [], [], []]
@@ -257,20 +287,22 @@ def build_graph(input_dir: Path, output_dir: Path, dry_run: bool = False):
                 vec = [0.0] * 768
             obj_data[4].append(vec)
         if obj_data[0]:
-            collections["object_vectors"].insert(obj_data)
+            collections[config.milvus_object_collection].insert(obj_data)
             
-        # Insert Actions (Action Vector)
-        act_data = [[], [], [], []]
+        # Insert Events (Action Vector)
+        event_data = [[], [], [], [], []]
         for ac in actions:
-            act_data[0].append(ac["track_id"])
-            act_data[1].append(metadata.get("video_id", ""))
-            act_data[2].append(ac.get("action_label", ""))
+            event_id = ac.get("event_id", f"event_{ac['track_id']}")
+            event_data[0].append(event_id)
+            event_data[1].append(ac["track_id"])
+            event_data[2].append(metadata.get("video_id", ""))
+            event_data[3].append(ac.get("action_label", ""))
             vec = ac.get("action_vector", [])
             if not vec or len(vec) != 256:
                 vec = [0.0] * 256
-            act_data[3].append(vec)
-        if act_data[0]:
-            collections["action_vectors"].insert(act_data)
+            event_data[4].append(vec)
+        if event_data[0]:
+            collections[config.milvus_event_collection].insert(event_data)
             
         for col in collections.values():
             col.flush()

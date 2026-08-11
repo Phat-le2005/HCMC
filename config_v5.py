@@ -55,6 +55,15 @@ class ATSMEConfig:
     milvus_host: str = "localhost"
     milvus_port: int = 19530
     elasticsearch_host: str = "http://localhost:9200"
+    
+    # -------------------- DB Collections/Indices --------------------
+    milvus_scene_collection: str = "atsme_scene_vectors"
+    milvus_shot_collection: str = "atsme_shot_vectors"
+    milvus_object_collection: str = "atsme_object_vectors"
+    milvus_event_collection: str = "atsme_event_vectors"
+    es_global_index: str = "atsme_global_text"
+    es_local_index: str = "atsme_local_text"
+    
     # -------------------- Misc --------------------
     log_level: str = "INFO"
 

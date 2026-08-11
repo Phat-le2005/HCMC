@@ -32,7 +32,7 @@ paddleocr==2.8.1                  # Text detection only (rec=False)
 # vietocr should be installed separately via --no-deps to avoid einops conflict
 
 # ── ASR ───────────────────────────────────────────────────────────────────────
-openai-whisper>=20231117
+faster-whisper>=1.0.0
 ffmpeg-python>=0.2.0              # Python bindings (ffmpeg system binary needed separately)
 
 # ── Missing Audio/Video/Stats Utils ───────────────────────────────────────────

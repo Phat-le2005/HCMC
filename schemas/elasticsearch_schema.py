@@ -70,7 +70,7 @@ def bulk_index(es: Elasticsearch, data):
                 }
             })
             
-    # Local Index
+    # Local Index (Static Objects)
     for so in data.get("static_objects", []):
         if so.get("ocr_text"):
             actions.append({
@@ -83,6 +83,23 @@ def bulk_index(es: Elasticsearch, data):
                     "class_label": so.get("class_label", "unknown"),
                     "ocr_text": so.get("ocr_text", ""),
                     "bbox": so.get("bbox", [])
+                }
+            })
+            
+    # Local Index (Dynamic OCR on Tracklets)
+    for ocr in data.get("ocr_local", []):
+        if ocr.get("recognized_text"):
+            doc_id = f"dyn_ocr_{ocr.get('track_id')}_{ocr.get('frame_idx')}"
+            actions.append({
+                "_index": config.es_local_index,
+                "_id": doc_id,
+                "_source": {
+                    "object_id": doc_id,
+                    "video_id": video_id,
+                    "shot_id": "unknown", # Dynamic objects span multiple shots, shot mapping is complex
+                    "class_label": "dynamic_tracklet",
+                    "ocr_text": ocr.get("recognized_text", ""),
+                    "bbox": []
                 }
             })
             

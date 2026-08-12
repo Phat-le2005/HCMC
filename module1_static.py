@@ -521,15 +521,27 @@ def main():
             scene["global_asr"] = ""
         print("  [Stage 6b] No ASR words available.")
 
-    # ─── Stage 6c: Propagate scene ASR back to shots ──────────────────
-    # Each shot gets its parent scene's ASR for ES indexing compatibility
-    scene_asr_map = {}
-    for scene in scene_list:
-        for sh_id in scene.get("shot_ids", []):
-            scene_asr_map[sh_id] = scene.get("global_asr", "")
-    
-    for shot in shots:
-        shot["global_asr"] = scene_asr_map.get(shot["shot_id"], "")
+    # ─── Stage 6c: Contextual Sliding Window ASR for Shots ────────────
+    # Expand each shot by +/- 5 seconds to form a coherent text window for retrieval
+    print("[Stage 6c] Assigning sliding window ASR to shots (+/- 5s)...")
+    if all_words:
+        for shot in shots:
+            s_start = max(0, shot["start_ms"] - 5000.0)
+            s_end = shot["end_ms"] + 5000.0
+            
+            shot_words = []
+            for w in all_words:
+                overlap_start = max(s_start, w["start_ms"])
+                overlap_end = min(s_end, w["end_ms"])
+                if overlap_end > overlap_start:
+                    shot_words.append(w["text"])
+                    
+            shot["global_asr"] = "".join(shot_words).strip()
+        print("  [Stage 6c] Contextual ASR assigned to shots.")
+    else:
+        for shot in shots:
+            shot["global_asr"] = ""
+        print("  [Stage 6c] No ASR words available.")
 
     # Save everything
     with open(out_dir / "scenes.json", "w", encoding="utf-8") as f:

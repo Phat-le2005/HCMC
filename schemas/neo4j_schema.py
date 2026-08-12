@@ -122,3 +122,34 @@ def ingest_graph(driver, data):
                 MATCH (t:Tracklet {track_id: $tid})
                 MERGE (t)-[:PERFORMS]->(e)
             """, eid=ac.get("event_id", f"event_{ac['track_id']}"), label=ac["action_label"], conf=ac["confidence"], tid=ac["track_id"])
+
+        # Insert Dynamic OCR (ocr_local)
+        for ocr in data.get("ocr_local", []):
+            if ocr.get("recognized_text"):
+                ocr_txt = ocr["recognized_text"]
+                doc_id = f"dyn_ocr_{ocr['track_id']}_{ocr['frame_idx']}"
+                text_id = _hash_text(ocr_txt, doc_id)
+                session.run("""
+                    MERGE (l:LexicalNode {text_id: $tid})
+                    SET l.text = $txt, l.source = 'dynamic_ocr'
+                    WITH l
+                    MATCH (t:Tracklet {track_id: $tid_track})
+                    MERGE (t)-[:HAS_TEXT]->(l)
+                """, tid=text_id, txt=ocr_txt, tid_track=ocr["track_id"])
+
+        # Create [:NEXT] relationships for Scenes
+        scenes = sorted(data.get("scenes", []), key=lambda x: x["start_ms"])
+        for i in range(len(scenes) - 1):
+            session.run("""
+                MATCH (sc1:Scene {scene_id: $sid1}), (sc2:Scene {scene_id: $sid2})
+                MERGE (sc1)-[:NEXT]->(sc2)
+            """, sid1=scenes[i]["scene_id"], sid2=scenes[i+1]["scene_id"])
+            
+        # Create [:NEXT] relationships for Shots
+        shots = sorted(data.get("shots", []), key=lambda x: x["start_ms"])
+        for i in range(len(shots) - 1):
+            session.run("""
+                MATCH (sh1:Shot {shot_id: $shid1}), (sh2:Shot {shot_id: $shid2})
+                MERGE (sh1)-[:NEXT]->(sh2)
+            """, shid1=shots[i]["shot_id"], shid2=shots[i+1]["shot_id"])
+

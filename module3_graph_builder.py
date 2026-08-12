@@ -155,6 +155,7 @@ def build_graph(input_dir: Path, output_dir: Path, dry_run: bool = False):
     tracklets_data = load_json_safe(tracklets_file) or {"tracklets": [], "static_objects": [], "metadata": {}}
     tracklets = tracklets_data.get("tracklets", [])
     static_objects = tracklets_data.get("static_objects", [])
+    ocr_local = tracklets_data.get("ocr_local", [])
     metadata = tracklets_data.get("metadata", {})
     
     actions = load_json_safe(actions_file) or []
@@ -180,6 +181,7 @@ def build_graph(input_dir: Path, output_dir: Path, dry_run: bool = False):
         "shots": shots,
         "tracklets": tracklets,
         "static_objects": static_objects,
+        "ocr_local": ocr_local,
         "actions": actions,
         "shot_to_tracklets": shot_to_tracklets
     }
@@ -244,16 +246,29 @@ def build_graph(input_dir: Path, output_dir: Path, dry_run: bool = False):
             scene_data[4].append(sc.get("news_type", "unknown"))
             fused_vec = [0.0]*1536
             kp = ""
+            img_pool = [0.0]*768
+            aud_pool = [0.0]*768
+            valid_shots = 0
+            
             for sh_id in sc.get("shot_ids", []):
                 for sh in shots:
                     if sh["shot_id"] == sh_id:
-                        img_vec = sh.get("image_vector", [0.0]*768)
-                        aud_vec = sh.get("audio_vector", [0.0]*768)
-                        kp = sh.get("image_vector_path", "")
+                        if not kp:
+                            kp = sh.get("image_vector_path", "")
+                        img_vec = sh.get("image_vector", [])
+                        aud_vec = sh.get("audio_vector", [])
                         if len(img_vec) == 768 and len(aud_vec) == 768:
-                            fused_vec = img_vec + aud_vec
+                            for i in range(768):
+                                img_pool[i] += img_vec[i]
+                                aud_pool[i] += aud_vec[i]
+                            valid_shots += 1
                         break
-                break
+
+            if valid_shots > 0:
+                img_pool = [x / valid_shots for x in img_pool]
+                aud_pool = [x / valid_shots for x in aud_pool]
+                fused_vec = img_pool + aud_pool
+                
             scene_data[5].append(kp)
             scene_data[6].append(fused_vec)
         if scene_data[0]:

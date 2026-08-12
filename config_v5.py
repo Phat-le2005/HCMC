@@ -52,8 +52,8 @@ class ATSMEConfig:
     news_classify_threshold: float = 0.35
     # -------------------- Service Endpoints --------------------
     neo4j_uri: str = "bolt://localhost:7687"
-    neo4j_user: str = "neo4j"
-    neo4j_password: str = "password"
+    neo4j_user: str = "1459097e"
+    neo4j_password: str = "ceFmdO3Rd2PmYaHMRmXrnlEEtze7DaMvNBgE-Kg3aqE"
     milvus_host: str = "localhost"
     milvus_port: int = 19530
     elasticsearch_host: str = "http://localhost:9200"

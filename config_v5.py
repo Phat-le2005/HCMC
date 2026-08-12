@@ -42,12 +42,14 @@ class ATSMEConfig:
     overlap_threshold: float = 0.5  # seconds
     # -------------------- News Classification --------------------
     news_prompts: Dict[str, str] = field(default_factory=lambda: {
-        "anchor": "a news anchor sitting at a desk in a studio presenting news",
-        "interview": "two or more people having a conversation or interview",
-        "report": "a reporter on location reporting live from a scene",
-        "montage": "a fast sequence of video clips or B-roll footage"
+        "anchor": "a single news anchor sitting behind a desk in a TV studio reading news, with studio lights and a screen behind",
+        "field_report": "a journalist or reporter standing outdoors on location holding a microphone, reporting live from a scene",
+        "interview": "a close-up shot of a person being interviewed, with a name tag or title overlay on screen",
+        "infographic": "a full-screen infographic, chart, map, statistics table, or animated data visualization on a news broadcast",
+        "b_roll": "outdoor footage of streets, buildings, landscapes, crowds, vehicles, or nature without any person talking directly to camera",
+        "transition": "a TV channel logo, program title card, opening sequence, or animated transition graphic between news segments"
     })
-    news_classify_threshold: float = 0.2
+    news_classify_threshold: float = 0.35
     # -------------------- Service Endpoints --------------------
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"

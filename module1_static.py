@@ -292,7 +292,7 @@ def main():
     # ═══════════════════════════════════════════════════════════════════
     print("[Stage 1] SigLIP: Image embeddings + News classification...")
     img_processor, img_model = load_siglip()
-    news_classifier = NewsSceneClassifier(config)  # Shares SigLIP weights
+    news_classifier = NewsSceneClassifier(config)
 
     for idx, shot in enumerate(shots):
         if "image_vector" in shot:
@@ -317,9 +317,9 @@ def main():
         if (idx + 1) % 20 == 0:
             print(f"  [Stage 1] {idx+1}/{len(shots)}")
 
-    free_vram(img_model, news_classifier)
+    free_vram(img_model, news_classifier.model)
     del img_processor, img_model, news_classifier
-    print("  [Stage 1] Done. SigLIP unloaded.")
+    print("  [Stage 1] Done. SigLIP + Classifier unloaded.")
 
     # ═══════════════════════════════════════════════════════════════════
     # Stage 2: Audio Embeddings (WavLM ~0.4GB)
@@ -400,8 +400,13 @@ def main():
     # ═══════════════════════════════════════════════════════════════════
     print("[Stage 5] Whisper: ASR transcription (Full video + VAD)...")
     full_audio_path = audio_dir / "full_audio.wav"
+    asr_words_file = out_dir / "asr_words.json"
     
-    if full_audio_path.exists():
+    if asr_words_file.exists():
+        print("  [Stage 5] asr_words.json already exists. Skipping transcription.")
+        with open(asr_words_file, "r", encoding="utf-8") as f:
+            all_words = json.load(f)
+    elif full_audio_path.exists():
         compute_type = "float16" if config.fp16 and config.device == "cuda" else "float32"
         whisper_model = WhisperModel(config.whisper_model, device=config.device, compute_type=compute_type)
         
@@ -423,35 +428,17 @@ def main():
                     "text": word.word
                 })
         
-        print("  [Stage 5] Mapping words to shots...")
-        for shot in shots:
-            if "global_asr" in shot and shot["global_asr"]:
-                continue
-                
-            s_start = shot["start_ms"]
-            s_end = shot["end_ms"]
-            
-            shot_words = []
-            for w in all_words:
-                # Check overlap between word and shot
-                overlap_start = max(s_start, w["start_ms"])
-                overlap_end = min(s_end, w["end_ms"])
-                if overlap_end > overlap_start:
-                    shot_words.append(w["text"])
-                    
-            # Join words and clean up spacing
-            shot["global_asr"] = "".join(shot_words).strip()
-            
+        # Save word-level ASR to file (will be mapped to scenes in Stage 6)
+        with open(asr_words_file, "w", encoding="utf-8") as f:
+            json.dump(all_words, f, ensure_ascii=False, indent=2)
+        print(f"  [Stage 5] Saved {len(all_words)} ASR words to asr_words.json")
+        
         free_vram(whisper_model)
         del whisper_model
         print("  [Stage 5] Done. Whisper unloaded.")
     else:
+        all_words = []
         print("  [WARN] full_audio.wav not found. Skipping ASR.")
-
-    # Final save
-    with open(shots_file, "w", encoding="utf-8") as f:
-        json.dump(shots, f, ensure_ascii=False, indent=2)
-    print("  [Checkpoint] ASR saved.")
 
     # ═══════════════════════════════════════════════════════════════════
     # Stage 6: Scene Clustering (CPU only, no GPU needed)
@@ -464,6 +451,7 @@ def main():
         if iv and av:
             fused_vectors.append(iv + av)
 
+    scene_list = []
     if len(fused_vectors) >= config.scene_min_shots:
         X = np.array(fused_vectors)
         times = np.array([s["start_ms"] for s in shots if s.get("image_vector")][:len(fused_vectors)])
@@ -488,7 +476,6 @@ def main():
             scenes_dict.setdefault(int(label), []).append(shot)
 
         from collections import Counter
-        scene_list = []
         for scene_id, shot_group in scenes_dict.items():
             news_types = [s.get("news_type", "unknown") for s in shot_group]
             majority_news = Counter(news_types).most_common(1)[0][0]
@@ -500,13 +487,69 @@ def main():
                 "end_ms": max(s["end_ms"] for s in shot_group),
                 "news_type": majority_news
             })
-        with open(out_dir / "scenes.json", "w", encoding="utf-8") as f:
-            json.dump(scene_list, f, ensure_ascii=False, indent=2)
     else:
-        print("Not enough shots/vectors for scene clustering. Skipping.")
+        # Fallback: treat all shots as one scene
+        print("  Not enough shots/vectors for clustering. Creating single scene.")
+        scene_list.append({
+            "scene_id": "scene_0",
+            "shot_ids": [s["shot_id"] for s in shots],
+            "start_ms": shots[0]["start_ms"] if shots else 0,
+            "end_ms": shots[-1]["end_ms"] if shots else 0,
+            "news_type": "unknown"
+        })
 
+    # ─── Stage 6b: Map ASR words → Scenes ─────────────────────────────
+    print("[Stage 6b] Mapping ASR words to scenes...")
+    if all_words:
+        for scene in scene_list:
+            sc_start = scene["start_ms"]
+            sc_end = scene["end_ms"]
+            
+            scene_words = []
+            for w in all_words:
+                # Word overlaps with scene time range
+                overlap_start = max(sc_start, w["start_ms"])
+                overlap_end = min(sc_end, w["end_ms"])
+                if overlap_end > overlap_start:
+                    scene_words.append(w["text"])
+            
+            scene["global_asr"] = "".join(scene_words).strip()
+            
+        print(f"  [Stage 6b] Mapped ASR to {len(scene_list)} scenes.")
+    else:
+        for scene in scene_list:
+            scene["global_asr"] = ""
+        print("  [Stage 6b] No ASR words available.")
+
+    # ─── Stage 6c: Propagate scene ASR back to shots ──────────────────
+    # Each shot gets its parent scene's ASR for ES indexing compatibility
+    scene_asr_map = {}
+    for scene in scene_list:
+        for sh_id in scene.get("shot_ids", []):
+            scene_asr_map[sh_id] = scene.get("global_asr", "")
+    
+    for shot in shots:
+        shot["global_asr"] = scene_asr_map.get(shot["shot_id"], "")
+
+    # Save everything
+    with open(out_dir / "scenes.json", "w", encoding="utf-8") as f:
+        json.dump(scene_list, f, ensure_ascii=False, indent=2)
+    
+    with open(shots_file, "w", encoding="utf-8") as f:
+        json.dump(shots, f, ensure_ascii=False, indent=2)
+    print("  [Checkpoint] Scenes + ASR saved.")
+
+    # ─── Final: Build lexical_global.json ─────────────────────────────
     lexical = {
         "video_id": video_path.stem,
+        "scenes": [{
+            "scene_id": sc["scene_id"],
+            "shot_ids": sc["shot_ids"],
+            "start_ms": sc["start_ms"],
+            "end_ms": sc["end_ms"],
+            "global_asr": sc.get("global_asr", ""),
+            "news_type": sc.get("news_type", "unknown")
+        } for sc in scene_list],
         "shots": [{
             "shot_id": s["shot_id"],
             "ocr": s.get("global_ocr", ""),
@@ -520,3 +563,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

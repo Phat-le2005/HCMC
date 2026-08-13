@@ -125,6 +125,39 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
     siglip_model.eval()
     if config.fp16 and config.device == "cuda":
         siglip_model.half()
+        
+    print(f"[Module 2A] Loading FastReID ({config.fastreid_model}) fallback on {config.device}...")
+    import torchvision.models as models
+    import torchvision.transforms as T
+    resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+    reid_model = torch.nn.Sequential(*(list(resnet.children())[:-1]))
+    reid_model.to(config.device)
+    reid_model.eval()
+    if config.fp16 and config.device == "cuda":
+        reid_model.half()
+        
+    reid_transform = T.Compose([
+        T.Resize((256, 128), antialias=True),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
+    def extract_reid(frame_np, bbox):
+        h, w = frame_np.shape[:2]
+        x1, y1, x2, y2 = bbox
+        x1, y1, x2, y2 = int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)
+        x1, y1 = max(0, x1 - 5), max(0, y1 - 5)
+        x2, y2 = min(w, x2 + 5), min(h, y2 + 5)
+        if x2 <= x1 or y2 <= y1:
+            return [0.0] * 2048
+        crop = frame_np[y1:y2, x1:x2]
+        img = Image.fromarray(crop).convert("RGB")
+        tensor = reid_transform(img).unsqueeze(0).to(config.device)
+        if config.fp16 and config.device == "cuda":
+            tensor = tensor.half()
+        with torch.no_grad():
+            feat = reid_model(tensor)
+        return feat.flatten().cpu().float().tolist()
 
     ocr_engine = HybridOCREngine(device=config.device)
 
@@ -204,10 +237,11 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
                 str_tid = str(int(tid))
                 label = names[int(cls_idx)]
 
-                emb = crop_and_embed(frames[j], box, siglip_processor, siglip_model)
+                emb_siglip = crop_and_embed(frames[j], box, siglip_processor, siglip_model)
+                emb_reid = extract_reid(frames[j], box)
 
                 if tracklets_dict[str_tid]["unified_id"] is None:
-                    matched_tid, sim = reid_pool.match(emb, threshold=config.reid_similarity_thresh)
+                    matched_tid, sim = reid_pool.match(emb_reid, threshold=config.reid_similarity_thresh)
                     tracklets_dict[str_tid]["unified_id"] = matched_tid if matched_tid else str_tid
 
                 unified_tid = tracklets_dict[str_tid]["unified_id"]
@@ -229,7 +263,7 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
                             "recognized_text": text
                         })
 
-                reid_pool.add(unified_tid, emb, current_ms)
+                reid_pool.add(unified_tid, emb_reid, current_ms)
 
         # Prevent OOM
         del frames, results

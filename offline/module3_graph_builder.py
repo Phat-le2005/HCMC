@@ -2,6 +2,7 @@ import os
 import json
 import argparse
 from pathlib import Path
+import numpy as np
 
 from config_v5 import config
 from schemas.milvus_schema import get_milvus_collections
@@ -322,6 +323,19 @@ def build_graph(input_dir: Path, output_dir: Path, dry_run: bool = False):
         for col in collections.values():
             col.flush()
         print("     [OK] Milvus ingestion complete.")
+
+        # 2b. Export node features for Heterogeneous Graph Transformer (HGT)
+        hgt_dir = output_dir / "hgt_data"
+        ensure_dir(hgt_dir)
+        vid_id = metadata.get("video_id", "unknown")
+        if scene_data[0]:
+            np.save(hgt_dir / f"{vid_id}_scenes.npy", np.array(scene_data[6], dtype=np.float32))
+        if obj_data[0]:
+            np.save(hgt_dir / f"{vid_id}_objects.npy", np.array(obj_data[4], dtype=np.float32))
+        if event_data[0]:
+            np.save(hgt_dir / f"{vid_id}_events.npy", np.array(event_data[4], dtype=np.float32))
+        print(f"     [OK] Exported Node Features for HGT training to {hgt_dir}")
+
 
         # 3. Elasticsearch
         print("  -> Connecting to Elasticsearch...")

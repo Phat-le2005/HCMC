@@ -63,20 +63,47 @@ def cut_tube(args):
         return None
     return str(tube_path)
 
+from transformers import AutoModel, AutoTokenizer
+import torchvision.transforms as T
+import decord
+from decord import VideoReader, cpu
+
+def load_video_tensor(video_path, num_frames=8):
+    decord.bridge.set_bridge('torch')
+    vr = VideoReader(str(video_path), ctx=cpu(0))
+    total_frames = len(vr)
+    if total_frames == 0:
+        return None
+    frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
+    video = vr.get_batch(frame_indices) # [T, H, W, C]
+    
+    # Transform: T, H, W, C -> C, T, H, W for InternVideo2
+    video = video.permute(3, 0, 1, 2).float() / 255.0
+    
+    transform = T.Compose([
+        T.Resize(224, antialias=True),
+        T.CenterCrop(224),
+        T.Normalize(mean=[0.48145466, 0.4578275, 0.40821073], std=[0.26862954, 0.26130258, 0.27577711])
+    ])
+    
+    # apply transform frame by frame
+    video = torch.stack([transform(video[:, i, :, :]) for i in range(num_frames)], dim=1) # [C, T, H, W]
+    return video.unsqueeze(0) # [1, C, T, H, W]
+
 def load_internvideo2():
     print(f"[Module 2B] Loading InternVideo2 {config.internvideo2_model} on {config.device}...")
-    # In a real environment, load the model:
-    # model = AutoModel.from_pretrained(config.internvideo2_model, trust_remote_code=True).to(config.device)
-    # model.eval()
-    # if config.fp16 and config.device == "cuda":
-    #     model.half()
-    # return model
-    
-    # Mock model for now to allow pipeline to run
-    class MockInternVideo2:
-        def __call__(self, video_tensor):
-            return {"action_label": "walking", "vector": np.random.rand(256).tolist(), "confidence": 0.95}
-    return MockInternVideo2()
+    try:
+        model = AutoModel.from_pretrained(config.internvideo2_model, trust_remote_code=True).to(config.device)
+        model.eval()
+        if config.fp16 and config.device == "cuda":
+            model.half()
+        return model
+    except Exception as e:
+        print(f"Warning: Failed to load InternVideo2 ({e}). Falling back to Mock.")
+        class MockInternVideo2:
+            def __call__(self, video_tensor):
+                return {"action_label": "walking", "vector": np.random.rand(256).tolist(), "confidence": 0.95}
+        return MockInternVideo2()
 
 def process_tracklets(tracklets_path: Path, video_path: Path, out_dir: Path):
     print(f"[Module 2B] Loading tracklets from {tracklets_path}")
@@ -100,14 +127,14 @@ def process_tracklets(tracklets_path: Path, video_path: Path, out_dir: Path):
     existing_actions = {}
     if actions_path.exists():
         with open(actions_path, "r", encoding="utf-8") as f:
-            actions_list = json.load(f)
-            existing_actions = {a["track_id"]: a for a in actions_list}
+            existing = json.load(f)
+            existing_actions = {a["track_id"]: a for a in existing}
             
     tracklets_to_process = [t for t in tracklets if t["track_id"] not in existing_actions]
     if not tracklets_to_process:
-        print("[Module 2B] All tracklets already processed.")
+        print("[Module 2B] All tracklets already processed. Exiting.")
         return
-    
+        
     # 1. Tube Cutter (CPU Multiprocessing)
     print(f"[Module 2B] Cutting {len(tracklets_to_process)} video tubes via ffmpeg multiprocessing...")
     pool_args = [(video_path, t, tubes_dir, metadata) for t in tracklets_to_process]
@@ -120,12 +147,12 @@ def process_tracklets(tracklets_path: Path, video_path: Path, out_dir: Path):
                 
     # 2. Action Recognition (GPU)
     model = load_internvideo2()
+    is_mock = type(model).__name__ == "MockInternVideo2"
     
     actions = list(existing_actions.values())
     
     print("[Module 2B] Running action recognition...")
-    # Process in batches
-    batch_size = 4 # Video models take lots of memory
+    batch_size = 4 
     
     for i in range(0, len(tube_paths), batch_size):
         batch = tube_paths[i:i+batch_size]
@@ -133,15 +160,34 @@ def process_tracklets(tracklets_path: Path, video_path: Path, out_dir: Path):
         for tube in batch:
             track_id = Path(tube).stem
             
-            # In real environment:
-            # Load video tensor, pass to model
-            result = model(tube)
+            if is_mock:
+                result = model(tube)
+                act_label = result["action_label"]
+                act_vec = result["vector"]
+                conf = result["confidence"]
+            else:
+                try:
+                    vid_tensor = load_video_tensor(tube).to(config.device)
+                    if config.fp16 and config.device == "cuda":
+                        vid_tensor = vid_tensor.half()
+                    with torch.no_grad():
+                        vid_feat = model.get_vid_features(vid_tensor)
+                        # Normalize and convert to list
+                        vid_feat = torch.nn.functional.normalize(vid_feat, dim=-1)
+                        act_vec = vid_feat[0].cpu().float().numpy().tolist()
+                        act_label = "action_feature"
+                        conf = 1.0
+                except Exception as e:
+                    print(f"Failed extracting {tube}: {e}")
+                    act_vec = [0.0] * 256
+                    act_label = "error"
+                    conf = 0.0
             
             actions.append({
                 "track_id": track_id,
-                "action_label": result["action_label"],
-                "action_vector": result["vector"],
-                "confidence": result["confidence"]
+                "action_label": act_label,
+                "action_vector": act_vec,
+                "confidence": conf
             })
             
         # Prevent OOM

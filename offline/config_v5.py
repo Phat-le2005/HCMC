@@ -51,12 +51,12 @@ class ATSMEConfig:
     })
     news_classify_threshold: float = 0.35
     # -------------------- Service Endpoints --------------------
-    neo4j_uri: str = "bolt://localhost:7687"
-    neo4j_user: str = "1459097e"
-    neo4j_password: str = "ceFmdO3Rd2PmYaHMRmXrnlEEtze7DaMvNBgE-Kg3aqE"
-    milvus_host: str = "localhost"
-    milvus_port: int = 19530
-    elasticsearch_host: str = "http://localhost:9200"
+    neo4j_uri: str = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+    neo4j_user: str = os.environ.get("NEO4J_USER", "1459097e")
+    neo4j_password: str = os.environ.get("NEO4J_PASSWORD", "ceFmdO3Rd2PmYaHMRmXrnlEEtze7DaMvNBgE-Kg3aqE")
+    milvus_host: str = os.environ.get("MILVUS_HOST", "localhost")
+    milvus_port: int = int(os.environ.get("MILVUS_PORT", "19530"))
+    elasticsearch_host: str = os.environ.get("ELASTICSEARCH_HOST", "http://localhost:9200")
     
     # -------------------- DB Collections/Indices --------------------
     milvus_scene_collection: str = "atsme_scene_vectors"

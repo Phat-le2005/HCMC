@@ -10,7 +10,7 @@ set -euo pipefail
 # 1. STATIC PIPELINE (Module 1)
 # -------------------------------------------------------------------
 echo "[Stage 1] Running static pipeline..."
-python "$(dirname "$0")/module1_static.py" \
+python "$(dirname "$0")/offline/module1_static.py" \
     --video "$1" \
     --output-dir "$(dirname "$0")/intermediate"
 
@@ -18,7 +18,7 @@ python "$(dirname "$0")/module1_static.py" \
 # 2. DYNAMIC PRODUCER (Module 2A)
 # -------------------------------------------------------------------
 echo "[Stage 2] Running dynamic producer..."
-python "$(dirname "$0")/module2a_producer.py" \
+python "$(dirname "$0")/offline/module2a_producer.py" \
     --video "$1" \
     --shots "$(dirname "$0")/intermediate/shots.json" \
     --output-dir "$(dirname "$0")/intermediate"
@@ -27,7 +27,7 @@ python "$(dirname "$0")/module2a_producer.py" \
 # 3. DYNAMIC CONSUMER (Module 2B)
 # -------------------------------------------------------------------
 echo "[Stage 3] Running dynamic consumer (action recognition)..."
-python "$(dirname "$0")/module2b_consumer.py" \
+python "$(dirname "$0")/offline/module2b_consumer.py" \
     --tracklets "$(dirname "$0")/intermediate/tracklets.json" \
     --video "$1" \
     --output-dir "$(dirname "$0")/intermediate"
@@ -36,7 +36,7 @@ python "$(dirname "$0")/module2b_consumer.py" \
 # 4. GRAPH BUILDER (Module 3)
 # -------------------------------------------------------------------
 echo "[Stage 4] Building knowledge graph..."
-python "$(dirname "$0")/module3_graph_builder.py" \
+python "$(dirname "$0")/offline/module3_graph_builder.py" \
     --input-dir "$(dirname "$0")/intermediate" \
     --output-dir "$(dirname "$0")/output"
 

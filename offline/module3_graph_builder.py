@@ -222,122 +222,68 @@ def build_graph(input_dir: Path, output_dir: Path, dry_run: bool = False):
 
     print("[Module 3] Initializing DB Clients...")
     try:
-        from neo4j import GraphDatabase
         from elasticsearch import Elasticsearch
+        import json
         
-        # 1. Neo4j Graph DB
-        print("  -> Connecting to Neo4j...")
-        driver = GraphDatabase.driver(config.neo4j_uri, auth=(config.neo4j_user, config.neo4j_password))
-        create_constraints(driver)
-        ingest_graph(driver, db_data)
-        driver.close()
-        print("     [OK] Neo4j ingestion complete.")
+        # Extract FPS for keyframe_id calculation
+        original_fps = lexical_global.get("original_fps", 25.0)
         
-        # 2. Milvus Vector DB
+        # 1. Milvus Vector DB (Flattened Architecture)
         print("  -> Connecting to Milvus...")
         collections = get_milvus_collections(host=config.milvus_host, port=config.milvus_port)
         
-        # Insert Scenes (Fused Vector)
-        scene_data = [[], [], [], [], [], [], []]
-        for sc in scenes:
-            scene_data[0].append(sc["scene_id"])
-            scene_data[1].append(metadata.get("video_id", ""))
-            scene_data[2].append(sc["start_ms"])
-            scene_data[3].append(sc["end_ms"])
-            scene_data[4].append(sc.get("news_type", "unknown"))
-            fused_vec = [0.0]*1536
-            kp = ""
-            img_pool = [0.0]*768
-            aud_pool = [0.0]*768
-            valid_shots = 0
-            
-            for sh_id in sc.get("shot_ids", []):
-                for sh in shots:
-                    if sh["shot_id"] == sh_id:
-                        if not kp:
-                            kp = sh.get("image_vector_path", "")
-                        img_vec = sh.get("image_vector", [])
-                        aud_vec = sh.get("audio_vector", [])
-                        if len(img_vec) == 768 and len(aud_vec) == 768:
-                            for i in range(768):
-                                img_pool[i] += img_vec[i]
-                                aud_pool[i] += aud_vec[i]
-                            valid_shots += 1
-                        break
-
-            if valid_shots > 0:
-                img_pool = [x / valid_shots for x in img_pool]
-                aud_pool = [x / valid_shots for x in aud_pool]
-                fused_vec = img_pool + aud_pool
-                
-            scene_data[5].append(kp)
-            scene_data[6].append(fused_vec)
-        if scene_data[0]:
-            collections[config.milvus_scene_collection].insert(scene_data)
-            
-        # Insert Shots (Fused Vector)
-        shot_data = [[], [], [], [], [], [], []]
+        shot_data = [[], [], [], [], []]
         for sh in shots:
-            shot_data[0].append(sh["shot_id"])
-            shot_data[1].append(metadata.get("video_id", ""))
-            shot_data[2].append(sh["start_ms"])
-            shot_data[3].append(sh["end_ms"])
-            shot_data[4].append(sh.get("news_type", "unknown"))
-            shot_data[5].append(sh.get("image_vector_path", ""))
+            shot_id = sh["shot_id"]
+            start_ms = sh["start_ms"]
+            end_ms = sh["end_ms"]
+            
+            # Calculate keyframe_id (middle frame)
+            keyframe_id = int(((start_ms + end_ms) / 2000.0) * original_fps)
+            
+            # Build payload (Flattened Graph)
+            entities = []
+            
+            # Add Static Objects associated with this shot
+            for so in static_objects:
+                if so.get("shot_id") == shot_id:
+                    entities.append(f"object_{so.get('class_label', '')}")
+            
+            # Add OCR
+            for ocr in ocr_local:
+                if ocr.get("shot_id") == shot_id:
+                    entities.append(f"ocr_{ocr.get('text', '')}")
+                    
+            # Add Events (Tracklets overlapping with this shot)
+            for track_id in shot_to_tracklets.get(shot_id, []):
+                for ac in actions:
+                    if ac["track_id"] == track_id:
+                        entities.append(f"event_{ac.get('action_label', '')}")
+            
+            # Include global OCR/ASR
+            for lex_sh in lexical_global.get("shots", []):
+                if lex_sh["shot_id"] == shot_id:
+                    if lex_sh.get("ocr"): entities.append(f"ocr_{lex_sh['ocr']}")
+                    if lex_sh.get("asr"): entities.append(f"asr_{lex_sh['asr']}")
+            
+            payload_str = json.dumps(entities, ensure_ascii=False)
+            
             img_vec = sh.get("image_vector", [0.0]*768)
             aud_vec = sh.get("audio_vector", [0.0]*768)
             fused_vec = img_vec + aud_vec if len(img_vec) == 768 and len(aud_vec) == 768 else [0.0]*1536
-            shot_data[6].append(fused_vec)
+            
+            shot_data[0].append(shot_id)
+            shot_data[1].append(metadata.get("video_id", lexical_global.get("video_id", "")))
+            shot_data[2].append(keyframe_id)
+            shot_data[3].append(payload_str)
+            shot_data[4].append(fused_vec)
+
         if shot_data[0]:
             collections[config.milvus_shot_collection].insert(shot_data)
-            
-        # Insert Static Objects (SigLIP Vector)
-        obj_data = [[], [], [], [], []]
-        for so in static_objects:
-            obj_data[0].append(so["object_id"])
-            obj_data[1].append(so.get("shot_id", ""))
-            obj_data[2].append(metadata.get("video_id", ""))
-            obj_data[3].append(so.get("class_label", ""))
-            vec = so.get("siglip_vector", [])
-            if not vec or len(vec) != 768:
-                vec = [0.0] * 768
-            obj_data[4].append(vec)
-        if obj_data[0]:
-            collections[config.milvus_object_collection].insert(obj_data)
-            
-        # Insert Events (Action Vector)
-        event_data = [[], [], [], [], []]
-        for ac in actions:
-            event_id = ac.get("event_id", f"event_{ac['track_id']}")
-            event_data[0].append(event_id)
-            event_data[1].append(ac["track_id"])
-            event_data[2].append(metadata.get("video_id", ""))
-            event_data[3].append(ac.get("action_label", ""))
-            vec = ac.get("action_vector", [])
-            if not vec or len(vec) != 256:
-                vec = [0.0] * 256
-            event_data[4].append(vec)
-        if event_data[0]:
-            collections[config.milvus_event_collection].insert(event_data)
-            
-        for col in collections.values():
-            col.flush()
-        print("     [OK] Milvus ingestion complete.")
+            collections[config.milvus_shot_collection].flush()
+        print("     [OK] Milvus flattened ingestion complete.")
 
-        # 2b. Export node features for Heterogeneous Graph Transformer (HGT)
-        hgt_dir = output_dir / "hgt_data"
-        ensure_dir(hgt_dir)
-        vid_id = metadata.get("video_id", "unknown")
-        if scene_data[0]:
-            np.save(hgt_dir / f"{vid_id}_scenes.npy", np.array(scene_data[6], dtype=np.float32))
-        if obj_data[0]:
-            np.save(hgt_dir / f"{vid_id}_objects.npy", np.array(obj_data[4], dtype=np.float32))
-        if event_data[0]:
-            np.save(hgt_dir / f"{vid_id}_events.npy", np.array(event_data[4], dtype=np.float32))
-        print(f"     [OK] Exported Node Features for HGT training to {hgt_dir}")
-
-
-        # 3. Elasticsearch
+        # 2. Elasticsearch
         print("  -> Connecting to Elasticsearch...")
         es = Elasticsearch(config.elasticsearch_host)
         create_indices(es)

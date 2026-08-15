@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 import subprocess
 import sys
-
+import time
 from config_v5 import config
 
 logging.basicConfig(
@@ -48,6 +48,12 @@ def cleanup_temp_files():
                 
     # Recreate dirs
     config.ensure_dirs()
+    
+    # Create export dirs
+    export_dir = Path("/kaggle/working/export")
+    export_jsons = export_dir / "jsons"
+    export_jsons.mkdir(parents=True, exist_ok=True)
+    
     log.info("Cleanup complete.")
 
 def process_video(video_path: Path):
@@ -70,12 +76,23 @@ def process_video(video_path: Path):
         "--tracklets", str(tracklets_file)
     ])
     
-    # 4. Graph Builder (Actual DB Ingestion - No dry run)
-    run_module("module3_graph_builder.py", [
-        "--input-dir", config.intermediate_dir,
-        "--output-dir", config.output_dir
+    # 4. Generate 360p Proxy
+    run_module("generate_proxy.py", [
+        "--video", str(video_path),
+        "--output_dir", "/kaggle/working/export"
     ])
     
+    # 5. Export JSONs (Rename and move)
+    log.info("Exporting JSON files...")
+    export_jsons = Path("/kaggle/working/export/jsons")
+    json_files = ["shots.json", "scenes.json", "tracklets.json", "actions.json", "lexical_global.json"]
+    
+    for jf in json_files:
+        src = Path(config.intermediate_dir) / jf
+        if src.exists():
+            dst = export_jsons / f"{video_path.stem}_{jf}"
+            shutil.copy2(src, dst)
+            
     log.info(f"--- Completed Video: {video_path.name} ---")
 
 def main():
@@ -103,8 +120,8 @@ def main():
                 
     log.info(f"Found {len(processed_vids)} already processed videos.")
 
-    # Find videos
-    video_paths = sorted(video_dir.glob("*.mp4"))
+    # Find videos recursively (support nested Dataset_AIC2026/Videos_L21_a/video/)
+    video_paths = sorted(video_dir.rglob("*.mp4"))
     log.info(f"Found {len(video_paths)} total videos.")
 
     # Filter out processed
@@ -115,8 +132,17 @@ def main():
         log.info("All videos processed! Exiting.")
         return
 
+    # Kaggle 12-hour limit survival: Auto-stop after 11.5 hours
+    MAX_RUNTIME_SEC = 11.5 * 3600
+    start_time = time.time()
+
     # Process sequentially
     for video_path in pending_videos:
+        elapsed_time = time.time() - start_time
+        if elapsed_time > MAX_RUNTIME_SEC:
+            log.warning(f"Reached {elapsed_time/3600:.2f} hours. Auto-stopping to let Kaggle save outputs!")
+            break
+            
         try:
             process_video(video_path)
             

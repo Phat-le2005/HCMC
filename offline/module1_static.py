@@ -552,8 +552,10 @@ def main():
     print("  [Checkpoint] Scenes + ASR saved.")
 
     # ─── Final: Build lexical_global.json ─────────────────────────────
+    video_fps = get_video_fps(video_path)
     lexical = {
         "video_id": video_path.stem,
+        "original_fps": video_fps,
         "scenes": [{
             "scene_id": sc["scene_id"],
             "shot_ids": sc["shot_ids"],

@@ -1,6 +1,5 @@
 from typing import Optional
-from neo4j import GraphDatabase, Driver
-from pymilvus import connections, utility
+from pymilvus import connections
 from elasticsearch import Elasticsearch
 from online.core.config import config
 
@@ -14,18 +13,8 @@ class DBClientManager:
         return cls._instance
 
     def _init_clients(self):
-        self._neo4j_driver: Optional[Driver] = None
         self._es_client: Optional[Elasticsearch] = None
         self._milvus_connected: bool = False
-
-    def get_neo4j(self) -> Driver:
-        if self._neo4j_driver is None:
-            print("[OnlineDB] Connecting to Neo4j...")
-            self._neo4j_driver = GraphDatabase.driver(
-                config.neo4j_uri, 
-                auth=(config.neo4j_user, config.neo4j_password)
-            )
-        return self._neo4j_driver
 
     def get_elasticsearch(self) -> Elasticsearch:
         if self._es_client is None:
@@ -40,9 +29,6 @@ class DBClientManager:
             self._milvus_connected = True
             
     def close_all(self):
-        if self._neo4j_driver:
-            self._neo4j_driver.close()
-            self._neo4j_driver = None
         if self._milvus_connected:
             connections.disconnect("default")
             self._milvus_connected = False

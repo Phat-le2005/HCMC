@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ATSME v6.0 - AIC Sniper</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #121212;
+            color: #e0e0e0;
+            margin: 0;
+            padding: 20px;
+        }
+        .search-container {
+            text-align: center;
+            margin-bottom: 20px;
+            position: sticky;
+            top: 0;
+            background-color: #121212;
+            padding: 10px;
+            z-index: 100;
+            border-bottom: 1px solid #333;
+        }
+        input[type="text"] {
+            width: 60%;
+            padding: 15px;
+            font-size: 18px;
+            border-radius: 8px;
+            border: 1px solid #333;
+            background-color: #1e1e1e;
+            color: white;
+        }
+        button {
+            padding: 15px 30px;
+            font-size: 18px;
+            border-radius: 8px;
+            border: none;
+            background-color: #007bff;
+            color: white;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+        button:hover { background-color: #0056b3; }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 15px;
+        }
+        .card {
+            background-color: #1e1e1e;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+            padding-bottom: 5px;
+            border: 2px solid transparent;
+        }
+        .card:hover { border-color: #007bff; }
+        .card img {
+            width: 100%;
+            height: 130px;
+            object-fit: cover;
+            display: block;
+            cursor: pointer;
+        }
+        .card-info {
+            padding: 8px;
+            font-size: 13px;
+        }
+        .action-btns {
+            display: flex;
+            justify-content: space-around;
+            padding: 5px;
+        }
+        .btn-shotgun {
+            background-color: #dc3545;
+            padding: 5px 10px;
+            font-size: 12px;
+            border-radius: 4px;
+        }
+        .btn-shotgun:hover { background-color: #c82333; }
+        .btn-vlm {
+            background-color: #28a745;
+            padding: 5px 10px;
+            font-size: 12px;
+            border-radius: 4px;
+        }
+        .btn-vlm:hover { background-color: #218838; }
+        
+        /* Modal Video Player */
+        #videoModal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background-color: rgba(0,0,0,0.9);
+            z-index: 1000;
+            text-align: center;
+        }
+        #videoPlayer {
+            margin-top: 50px;
+            max-width: 80%;
+            max-height: 70vh;
+        }
+        .modal-controls {
+            margin-top: 20px;
+        }
+        .frame-indicator {
+            font-size: 24px;
+            font-weight: bold;
+            color: #ffc107;
+            margin: 10px;
+        }
+        .close-btn {
+            position: absolute;
+            top: 20px; right: 30px;
+            font-size: 30px;
+            color: white;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="search-container">
+        <h1>ATSME AIC - Sniper Mode</h1>
+        <input type="text" id="queryInput" placeholder="Nhập Query..." onkeypress="if(event.key === 'Enter') performSearch()">
+        <button onclick="performSearch()">Search (RRF)</button>
+        <div id="stats" style="margin-top:10px; color:#888;"></div>
+    </div>
+
+    <div class="grid" id="resultsGrid"></div>
+
+    <!-- Proxy Video Player Modal -->
+    <div id="videoModal">
+        <span class="close-btn" onclick="closeModal()">&times;</span>
+        <video id="videoPlayer" controls>
+            <source src="" type="video/mp4">
+        </video>
+        <div class="modal-controls">
+            <div class="frame-indicator">FPS: <span id="fpsVal">25</span> | Frame: <span id="frameId">0</span></div>
+            <p>Mũi tên Trái/Phải: Tua 1 frame | Phím 1,2,3: Chốt Event | Bấm 'S': Nộp TRAKE CSV</p>
+            <button onclick="submitTrake()">Export TRAKE CSV</button>
+        </div>
+    </div>
+
+    <script>
+        let currentFps = 25;
+        const videoPlayer = document.getElementById('videoPlayer');
+        const frameIdSpan = document.getElementById('frameId');
+        let trakeEvents = [];
+
+        async function performSearch() {
+            const q = document.getElementById('queryInput').value;
+            const grid = document.getElementById('resultsGrid');
+            const stats = document.getElementById('stats');
+            
+            grid.innerHTML = '<p>Đang tìm kiếm...</p>';
+            stats.innerHTML = '';
+            
+            try {
+                const response = await fetch(`/search?q=${encodeURIComponent(q)}`);
+                const data = await response.json();
+                
+                stats.innerHTML = `Tìm thấy ${data.hits.length} kết quả (RRF) trong ${data.latency_ms} ms`;
+                grid.innerHTML = '';
+                
+                data.hits.forEach((hit, idx) => {
+                    const card = document.createElement('div');
+                    card.className = 'card';
+                    
+                    card.innerHTML = `
+                        <img src="/static/placeholder.jpg" loading="lazy" alt="Thumb" ondblclick="openVideo('${hit.video_id}', ${hit.keyframe_id}, 25)">
+                        <div class="card-info">
+                            <b>Rank:</b> #${idx + 1} | <b>Score:</b> ${hit.rrf_score.toFixed(4)}<br>
+                            <b>Video:</b> ${hit.video_id}<br>
+                            <b>Frame:</b> <span style="color:#ffc107">${hit.keyframe_id}</span>
+                        </div>
+                        <div class="action-btns">
+                            <button class="btn-shotgun" onclick="shotgunSubmit('${hit.video_id}', ${hit.keyframe_id})">🔫 Shotgun KIS</button>
+                            <button class="btn-vlm" onclick="askVLM('${hit.shot_id}')">🤖 Ask VLM</button>
+                        </div>
+                    `;
+                    grid.appendChild(card);
+                });
+                
+            } catch (error) {
+                grid.innerHTML = '<p style="color:red">Lỗi kết nối tới Server!</p>';
+            }
+        }
+
+        // --- KIS Shotgun Submit ---
+        function shotgunSubmit(videoId, centerFrame) {
+            alert(`Đang sinh CSV Shotgun KIS cho video ${videoId}, frame gốc: ${centerFrame}`);
+            let csvContent = "data:text/csv;charset=utf-8,";
+            // Lệch cực nhỏ cho top đầu
+            const offsets = [0, -2, 2, -5, 5, -10, 10, -15, 15, -20, 20];
+            let rowCount = 0;
+            
+            offsets.forEach(off => {
+                let f = Math.max(0, centerFrame + off);
+                csvContent += `${videoId},${f}\n`;
+                rowCount++;
+            });
+            
+            // Random fill for remaining up to 100
+            while(rowCount < 100) {
+                let randOff = Math.floor(Math.random() * 200) - 100; // -100 to +100
+                let f = Math.max(0, centerFrame + randOff);
+                csvContent += `${videoId},${f}\n`;
+                rowCount++;
+            }
+            
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", `KIS_Shotgun_${videoId}_${centerFrame}.csv`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        // --- TRAKE Sniper Player ---
+        function openVideo(videoId, startFrame, fps) {
+            currentFps = fps;
+            document.getElementById('videoModal').style.display = 'block';
+            document.getElementById('fpsVal').innerText = fps;
+            trakeEvents = [];
+            
+            // Proxy video URL
+            const videoUrl = `/static/proxies/${videoId}_proxy.mp4`;
+            videoPlayer.src = videoUrl;
+            
+            // Jump to frame
+            videoPlayer.currentTime = startFrame / fps;
+            videoPlayer.play();
+        }
+
+        function closeModal() {
+            document.getElementById('videoModal').style.display = 'none';
+            videoPlayer.pause();
+        }
+
+        // Frame-stepping logic
+        videoPlayer.addEventListener('timeupdate', () => {
+            frameIdSpan.innerText = Math.round(videoPlayer.currentTime * currentFps);
+        });
+
+        window.addEventListener('keydown', (e) => {
+            if (document.getElementById('videoModal').style.display === 'block') {
+                if (e.key === 'ArrowLeft') {
+                    videoPlayer.pause();
+                    videoPlayer.currentTime -= (1 / currentFps);
+                } else if (e.key === 'ArrowRight') {
+                    videoPlayer.pause();
+                    videoPlayer.currentTime += (1 / currentFps);
+                } else if (['1', '2', '3', '4', '5'].includes(e.key)) {
+                    let currentFrame = Math.round(videoPlayer.currentTime * currentFps);
+                    trakeEvents.push(currentFrame);
+                    alert(`Đã chốt Event ${trakeEvents.length}: Frame ${currentFrame}`);
+                } else if (e.key.toLowerCase() === 's') {
+                    submitTrake();
+                }
+            }
+        });
+
+        function submitTrake() {
+            if (trakeEvents.length === 0) {
+                alert("Chưa chốt Event nào!"); return;
+            }
+            let videoId = videoPlayer.src.split('/').pop().replace('_proxy.mp4', '');
+            let csvContent = "data:text/csv;charset=utf-8,";
+            csvContent += `${videoId},` + trakeEvents.join(',') + "\n";
+            
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", `TRAKE_${videoId}.csv`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        // --- Q&A VLM Assistant ---
+        function askVLM(shotId) {
+            alert("Đã gửi frame cho Qwen2.5-VL đếm số lượng/đọc chữ...");
+            // Call FastAPI backend here to run VLM inference
+        }
+    </script>
+</body>
+</html>

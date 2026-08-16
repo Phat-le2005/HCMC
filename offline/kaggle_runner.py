@@ -156,7 +156,13 @@ def main():
             
         except Exception as e:
             log.error(f"Failed processing {video_path.name}: {e}")
-            log.warning("Skipping to next video (this failure will NOT be logged as processed).")
+            log.warning("Skipping to next video. Logging to failed_videos.txt.")
+            
+            # Log failure so user can inspect later
+            failed_file = progress_file.parent / "failed_videos.txt"
+            with open(failed_file, "a", encoding="utf-8") as f:
+                f.write(f"{video_path.stem} - ERROR: {str(e)}\n")
+                
             # Clean up partial run to save space
             cleanup_temp_files()
             continue

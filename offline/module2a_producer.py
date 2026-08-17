@@ -109,7 +109,8 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
         return
 
     print(f"[Module 2A] Loading video: {video_path}")
-    vr = VideoReader(str(video_path), ctx=cpu(0))
+    # Downscale to 720p at decode time to prevent Kaggle CPU RAM OOM (SIGKILL: 9) on 4K videos
+    vr = VideoReader(str(video_path), ctx=cpu(0), width=1280, height=720)
     video_fps = vr.get_avg_fps()
     total_video_frames = len(vr)
     duration_ms = total_video_frames / video_fps * 1000
@@ -245,7 +246,6 @@ def process_video(video_path: Path, shots_path: Path, out_dir: Path):
                     tracklets_dict[str_tid]["unified_id"] = matched_tid if matched_tid else str_tid
 
                 unified_tid = tracklets_dict[str_tid]["unified_id"]
-
                 tracklets_dict[unified_tid]["class_labels"].append(label)
                 tracklets_dict[unified_tid]["start_ms"] = min(tracklets_dict[unified_tid]["start_ms"], current_ms)
                 tracklets_dict[unified_tid]["end_ms"] = max(tracklets_dict[unified_tid]["end_ms"], current_ms)

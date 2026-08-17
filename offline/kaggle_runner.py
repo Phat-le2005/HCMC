@@ -85,6 +85,7 @@ def process_video(video_path: Path):
     # 5. Export JSONs (Rename and move)
     log.info("Exporting JSON files...")
     export_jsons = Path("/kaggle/working/export/jsons")
+    export_jsons.mkdir(parents=True, exist_ok=True)
     json_files = ["shots.json", "scenes.json", "tracklets.json", "actions.json", "lexical_global.json"]
     
     for jf in json_files:
